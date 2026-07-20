@@ -108,22 +108,14 @@ platform :ios do
       xcodeproj: "ios/GrokRemote.xcodeproj"
     )
 
+    # Archive only — gym's export_method injects "app-store" which Xcode 16 rejects.
     gym(
       scheme: "GrokRemote",
       project: "ios/GrokRemote.xcodeproj",
-      # gym API still says "app-store"; Xcode 16 exportOptions wants "app-store-connect"
-      export_method: "app-store",
       clean: true,
+      skip_package_ipa: true,
+      skip_package_pkg: true,
       include_bitcode: false,
-      export_options: {
-        method: "app-store-connect",
-        signingStyle: "manual",
-        teamID: "3V4NW789C6",
-        provisioningProfiles: {
-          "uk.firashome.tethrx" => "match AppStore uk.firashome.tethrx",
-          "uk.firashome.tethrx.widget" => "match AppStore uk.firashome.tethrx.widget"
-        }
-      },
       xcargs: [
         "CODE_SIGN_STYLE=Manual",
         'CODE_SIGN_IDENTITY="iPhone Distribution"',
@@ -131,9 +123,24 @@ platform :ios do
       ].join(" ")
     )
 
+    archive_path = lane_context[SharedValues::XCODEBUILD_ARCHIVE]
+    export_dir = File.expand_path("build/export")
+    FileUtils.rm_rf(export_dir)
+    FileUtils.mkdir_p(export_dir)
+    sh(
+      "xcodebuild", "-exportArchive",
+      "-archivePath", archive_path,
+      "-exportPath", export_dir,
+      "-exportOptionsPlist", "ios/ExportOptions.plist"
+    )
+    ipa = Dir["#{export_dir}/*.ipa"].first
+    UI.user_error!("No IPA after export") unless ipa
+    UI.success("Exported #{ipa}")
+
     pilot(
       api_key: api_key,
       app_identifier: "uk.firashome.tethrx",
+      ipa: ipa,
       skip_waiting_for_build_processing: true,
       skip_submission: true
     )
