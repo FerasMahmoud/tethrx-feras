@@ -1,0 +1,87 @@
+name: ASC add me internal
+on:
+  workflow_dispatch:
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          pip install -q PyJWT cryptography requests
+          python3 <<'PY'
+          import time, jwt, requests, os, json
+          key_id, issuer, key = os.environ["ASC_KEY_ID"], os.environ["ASC_ISSUER_ID"], os.environ["ASC_KEY"]
+          now = int(time.time())
+          token = jwt.encode({"iss": issuer, "iat": now, "exp": now+1100, "aud": "appstoreconnect-v1"},
+                             key, algorithm="ES256", headers={"kid": key_id})
+          H = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+          B = "https://api.appstoreconnect.apple.com/v1"
+          APP, BUILD = "6792920176", "874b95e7-8203-434a-8153-4edcf959c4b1"
+          INT, EXT = "64c7e42a-01d7-4967-b525-798974f0642b", "f982bd7b-0e37-40d8-b2bc-1bdd7cde48b9"
+          EMAIL = "feras299@gmail.com"
+          TESTER = "018f2ed7-b143-4b69-a688-88551cdb093b"
+
+          def get(p, **kw):
+              r = requests.get(B+p, headers=H, timeout=60, **kw)
+              print("GET", p, r.status_code)
+              return r
+          def post(p, body):
+              r = requests.post(B+p, headers=H, json=body, timeout=60)
+              print("POST", p, r.status_code, r.text[:1200])
+              return r
+          def patch(p, body):
+              r = requests.patch(B+p, headers=H, json=body, timeout=60)
+              print("PATCH", p, r.status_code, r.text[:800])
+              return r
+
+          # List ASC users (team)
+          r = get("/users", params={"limit": 50})
+          print("USERS", json.dumps(r.json(), indent=2)[:3000])
+          users = r.json().get("data") or []
+          me = None
+          for u in users:
+              un = (u.get("attributes") or {}).get("username") or ""
+              print(" user", un, u["id"], (u.get("attributes") or {}).get("roles"))
+              if EMAIL.lower() in un.lower() or un.lower() == EMAIL.lower():
+                  me = u
+
+          # Add beta tester to INTERNAL group (ASC users can be internal testers)
+          post(f"/betaGroups/{INT}/relationships/betaTesters",
+               {"data": [{"type": "betaTesters", "id": TESTER}]})
+
+          # hasAccessToAllBuilds true on internal
+          patch(f"/betaGroups/{INT}", {"data": {"type": "betaGroups", "id": INT,
+              "attributes": {"hasAccessToAllBuilds": True, "name": "Internal"}}})
+
+          # List testers on internal group
+          r = get(f"/betaGroups/{INT}/betaTesters")
+          print("INT_TESTERS", r.status_code, r.text[:1500])
+
+          # List individual testers on build
+          r = get(f"/builds/{BUILD}/individualTesters")
+          print("INDIVIDUAL", r.status_code, r.text[:1500])
+
+          # External review state
+          r = get(f"/builds/{BUILD}/buildBetaDetail")
+          print("DETAIL", json.dumps(r.json(), indent=2)[:1000])
+          r = get(f"/builds/{BUILD}/betaAppReviewSubmission")
+          print("REVIEW", r.status_code, r.text[:800])
+
+          # Try enable public link on external (only works after approval)
+          r = get(f"/betaGroups/{EXT}")
+          print("EXT", json.dumps(r.json().get("data",{}).get("attributes"), indent=2))
+
+          print("DONE")
+          print("""
+=== FOR FERAS ===
+Your app: TethrX Feras (NOT the public TethrX 0.9.1)
+ASC: https://appstoreconnect.apple.com/apps/6792920176/testflight/ios
+Internal is READY. In ASC web:
+  TestFlight -> Internal Testing -> Internal -> Testers -> + -> add yourself
+Then open TestFlight on iPhone with feras299@gmail.com and refresh.
+Public TethrX 0.9.1 is a DIFFERENT app (com.tethrx.app) - ignore it for pairing to your PC.
+""")
+          PY
