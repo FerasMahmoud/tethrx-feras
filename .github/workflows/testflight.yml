@@ -47,7 +47,7 @@ jobs:
         with:
           name: TethrX-Feras-ipa
           path: |
-            *.ipa
+            build/export/*.ipa
             **/*.ipa
           if-no-files-found: ignore
           retention-days: 14
