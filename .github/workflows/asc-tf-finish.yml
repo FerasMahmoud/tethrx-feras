@@ -1,0 +1,104 @@
+name: ASC finish TestFlight
+on:
+  workflow_dispatch:
+jobs:
+  finish:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          pip install -q PyJWT cryptography requests
+          python3 <<'PY'
+          import time, jwt, requests, os, json
+          key_id, issuer, key = os.environ["ASC_KEY_ID"], os.environ["ASC_ISSUER_ID"], os.environ["ASC_KEY"]
+          now = int(time.time())
+          token = jwt.encode({"iss": issuer, "iat": now, "exp": now+1100, "aud": "appstoreconnect-v1"},
+                             key, algorithm="ES256", headers={"kid": key_id})
+          H = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+          B = "https://api.appstoreconnect.apple.com/v1"
+          APP, BUILD, EMAIL = "6792920176", "874b95e7-8203-434a-8153-4edcf959c4b1", "feras299@gmail.com"
+          EXT = "f982bd7b-0e37-40d8-b2bc-1bdd7cde48b9"
+          INT = "64c7e42a-01d7-4967-b525-798974f0642b"
+
+          def get(p, **kw):
+              r = requests.get(B+p, headers=H, timeout=60, **kw); print("GET", p, r.status_code); return r
+          def post(p, body):
+              r = requests.post(B+p, headers=H, json=body, timeout=60); print("POST", p, r.status_code, r.text[:1000]); return r
+          def patch(p, body):
+              r = requests.patch(B+p, headers=H, json=body, timeout=60); print("PATCH", p, r.status_code, r.text[:800]); return r
+
+          # 1) Beta App Localization (description required for external)
+          r = get(f"/apps/{APP}/betaAppLocalizations")
+          locs = r.json().get("data") or []
+          print("locs", r.text[:800])
+          if not locs:
+              post("/betaAppLocalizations", {"data": {"type": "betaAppLocalizations",
+                  "attributes": {
+                      "locale": "en-GB",
+                      "description": "TethrX Feras is a personal remote control for Grok Build on Feras-PC. The phone only talks to your own bridge at tethrx.firashome.uk. No third-party servers.",
+                      "feedbackEmail": EMAIL,
+                      "marketingUrl": None,
+                      "privacyPolicyUrl": None,
+                      "tvOsPrivacyPolicy": None,
+                  },
+                  "relationships": {"app": {"data": {"type": "apps", "id": APP}}}}})
+          else:
+              lid = locs[0]["id"]
+              patch(f"/betaAppLocalizations/{lid}", {"data": {"type": "betaAppLocalizations", "id": lid,
+                  "attributes": {
+                      "description": "TethrX Feras is a personal remote control for Grok Build on Feras-PC. The phone only talks to your own bridge at tethrx.firashome.uk.",
+                      "feedbackEmail": EMAIL,
+                  }}})
+
+          # 2) Beta build localization (whatToTest lives here)
+          r = get(f"/builds/{BUILD}/betaBuildLocalizations")
+          print("buildLocs", r.status_code, r.text[:600])
+          bl = r.json().get("data") or []
+          if not bl:
+              post("/betaBuildLocalizations", {"data": {"type": "betaBuildLocalizations",
+                  "attributes": {"locale": "en-GB", "whatsNew": "First personal build. Pair with https://tethrx.firashome.uk"},
+                  "relationships": {"build": {"data": {"type": "builds", "id": BUILD}}}}})
+          else:
+              patch(f"/betaBuildLocalizations/{bl[0]['id']}", {"data": {"type": "betaBuildLocalizations", "id": bl[0]["id"],
+                  "attributes": {"whatsNew": "First personal build. Pair with https://tethrx.firashome.uk"}}})
+
+          # 3) Create tester with ONLY external group
+          r = get("/betaTesters", params={"filter[email]": EMAIL})
+          testers = r.json().get("data") or []
+          tid = testers[0]["id"] if testers else None
+          if not tid:
+              r = post("/betaTesters", {"data": {"type": "betaTesters",
+                  "attributes": {"email": EMAIL, "firstName": "Feras", "lastName": "Mahmoud"},
+                  "relationships": {"betaGroups": {"data": [{"type": "betaGroups", "id": EXT}]}}}})
+              if r.status_code in (200,201):
+                  tid = r.json()["data"]["id"]
+          else:
+              post(f"/betaGroups/{EXT}/relationships/betaTesters", {"data": [{"type": "betaTesters", "id": tid}]})
+              # try add to internal too
+              post(f"/betaGroups/{INT}/relationships/betaTesters", {"data": [{"type": "betaTesters", "id": tid}]})
+
+          if tid:
+              post(f"/builds/{BUILD}/relationships/individualTesters", {"data": [{"type": "betaTesters", "id": tid}]})
+
+          # 4) Ensure build on external group
+          post(f"/betaGroups/{EXT}/relationships/builds", {"data": [{"type": "builds", "id": BUILD}]})
+
+          # 5) Submit for external beta review
+          r = get(f"/builds/{BUILD}/betaAppReviewSubmission")
+          print("review", r.status_code, r.text[:500])
+          if not r.json().get("data"):
+              post("/betaAppReviewSubmissions", {"data": {"type": "betaAppReviewSubmissions",
+                  "relationships": {"build": {"data": {"type": "builds", "id": BUILD}}}}})
+
+          # 6) Public link on external group (instant install without review? no - still needs review for external)
+          # Enable public link after approval
+
+          r = get(f"/builds/{BUILD}/buildBetaDetail")
+          print("FINAL", json.dumps(r.json(), indent=2)[:1200])
+          r = get(f"/betaGroups/{EXT}")
+          print("EXT_GROUP", json.dumps(r.json(), indent=2)[:1200])
+          print("DONE")
+          PY
