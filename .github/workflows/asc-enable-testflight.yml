@@ -1,0 +1,152 @@
+name: ASC enable TestFlight
+on:
+  workflow_dispatch:
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable internal TestFlight for build
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          pip install -q PyJWT cryptography requests
+          python3 <<'PY'
+          import time, jwt, requests, os, json
+          key_id = os.environ["ASC_KEY_ID"]
+          issuer = os.environ["ASC_ISSUER_ID"]
+          key = os.environ["ASC_KEY"]
+          now = int(time.time())
+          token = jwt.encode(
+              {"iss": issuer, "iat": now, "exp": now + 1100, "aud": "appstoreconnect-v1"},
+              key, algorithm="ES256", headers={"kid": key_id, "typ": "JWT"},
+          )
+          H = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+          base = "https://api.appstoreconnect.apple.com/v1"
+          APP = "6792920176"
+          BUILD = "874b95e7-8203-434a-8153-4edcf959c4b1"
+          EMAIL = "feras299@gmail.com"
+
+          def jget(url, **kw):
+              r = requests.get(url, headers=H, timeout=60, **kw)
+              print("GET", url.split("v1/")[-1], r.status_code)
+              return r
+
+          def jpost(url, body):
+              r = requests.post(url, headers=H, json=body, timeout=60)
+              print("POST", url.split("v1/")[-1], r.status_code, r.text[:800])
+              return r
+
+          def jpatch(url, body):
+              r = requests.patch(url, headers=H, json=body, timeout=60)
+              print("PATCH", url.split("v1/")[-1], r.status_code, r.text[:800])
+              return r
+
+          # build beta detail
+          r = jget(f"{base}/builds/{BUILD}/buildBetaDetail")
+          print(json.dumps(r.json(), indent=2)[:2000])
+          detail = r.json().get("data") or {}
+          detail_id = detail.get("id")
+          attrs = (detail.get("attributes") or {})
+          print("internalBuildState", attrs.get("internalBuildState"))
+          print("externalBuildState", attrs.get("externalBuildState"))
+          print("autoNotifyEnabled", attrs.get("autoNotifyEnabled"))
+
+          # list beta groups
+          r = jget(f"{base}/apps/{APP}/betaGroups")
+          groups = r.json().get("data") or []
+          print("groups", [(g["id"], g["attributes"].get("name"), g["attributes"].get("isInternalGroup")) for g in groups])
+
+          group_id = None
+          for g in groups:
+              if g["attributes"].get("isInternalGroup"):
+                  group_id = g["id"]
+                  break
+
+          if not group_id:
+              # create internal group
+              r = jpost(f"{base}/betaGroups", {
+                  "data": {
+                      "type": "betaGroups",
+                      "attributes": {
+                          "name": "Internal",
+                          "isInternalGroup": True,
+                          "hasAccessToAllBuilds": True,
+                      },
+                      "relationships": {
+                          "app": {"data": {"type": "apps", "id": APP}}
+                      }
+                  }
+              })
+              if r.status_code in (200, 201):
+                  group_id = r.json()["data"]["id"]
+              else:
+                  # try without hasAccessToAllBuilds
+                  r = jpost(f"{base}/betaGroups", {
+                      "data": {
+                          "type": "betaGroups",
+                          "attributes": {"name": "Feras Internal", "isInternalGroup": True},
+                          "relationships": {"app": {"data": {"type": "apps", "id": APP}}}
+                      }
+                  })
+                  if r.status_code in (200, 201):
+                      group_id = r.json()["data"]["id"]
+
+          print("group_id", group_id)
+
+          # ensure beta tester (yourself)
+          r = jget(f"{base}/betaTesters", params={"filter[email]": EMAIL, "filter[apps]": APP})
+          testers = r.json().get("data") or []
+          print("testers", json.dumps(r.json(), indent=2)[:1500])
+          tester_id = testers[0]["id"] if testers else None
+
+          if not tester_id:
+              body = {
+                  "data": {
+                      "type": "betaTesters",
+                      "attributes": {"email": EMAIL, "firstName": "Feras", "lastName": "Mahmoud"},
+                      "relationships": {
+                          "betaGroups": {"data": [{"type": "betaGroups", "id": group_id}]} if group_id else {"data": []},
+                          "apps": {"data": [{"type": "apps", "id": APP}]},
+                      }
+                  }
+              }
+              r = jpost(f"{base}/betaTesters", body)
+              if r.status_code in (200, 201):
+                  tester_id = r.json()["data"]["id"]
+
+          # add tester to group
+          if group_id and tester_id:
+              r = jpost(f"{base}/betaGroups/{group_id}/relationships/betaTesters", {
+                  "data": [{"type": "betaTesters", "id": tester_id}]
+              })
+
+          # assign build to group
+          if group_id:
+              r = jpost(f"{base}/betaGroups/{group_id}/relationships/builds", {
+                  "data": [{"type": "builds", "id": BUILD}]
+              })
+              # also reverse
+              r = jpost(f"{base}/builds/{BUILD}/relationships/betaGroups", {
+                  "data": [{"type": "betaGroups", "id": group_id}]
+              })
+
+          # submit for beta review if needed for external - for internal should auto
+          # enable auto notify
+          if detail_id:
+              jpatch(f"{base}/buildBetaDetails/{detail_id}", {
+                  "data": {
+                      "type": "buildBetaDetails",
+                      "id": detail_id,
+                      "attributes": {"autoNotifyEnabled": True}
+                  }
+              })
+
+          # re-check
+          r = jget(f"{base}/builds/{BUILD}/buildBetaDetail")
+          print("FINAL_DETAIL", json.dumps(r.json(), indent=2)[:2000])
+          r = jget(f"{base}/builds/{BUILD}/relationships/betaGroups")
+          print("BUILD_GROUPS", r.status_code, r.text[:1000])
+          print("DONE")
+          PY
