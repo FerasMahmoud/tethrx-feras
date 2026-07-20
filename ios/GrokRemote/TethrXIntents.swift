@@ -7,7 +7,8 @@ enum IntentBridge {
     static func client() -> BridgeClient? {
         let d = UserDefaults.standard
         var base = (d.string(forKey: "bridge.baseURL") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !base.isEmpty else { return nil }
+        // Fall back to Feras Cloudflare bridge when UserDefaults empty (Siri cold start).
+        if base.isEmpty { base = FerasDefaults.bridgeURL }
         if !base.contains("://") { base = "http://" + base }
         while base.hasSuffix("/") { base.removeLast() }
         guard let url = URL(string: base) else { return nil }

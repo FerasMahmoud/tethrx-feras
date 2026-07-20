@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Pair an additional computer from Settings — no need to disconnect from the one
 /// you're already on. If the new credentials don't connect, AppState puts the
@@ -36,6 +37,27 @@ struct AddComputerSheet: View {
 
                     field("BRIDGE ADDRESS", "192.168.1.10:4180", $address, secure: false)
                     field("PAIRING TOKEN", "from the pairing page", $pairingToken, secure: true)
+
+                    Button {
+                        if let s = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+                            if s.hasPrefix("tethrx://") || s.contains("token=") {
+                                // Reuse same QR URL parser as scan
+                                if let c = URLComponents(string: s), c.scheme == "tethrx",
+                                   let addr = c.queryItems?.first(where: { $0.name == "addr" })?.value,
+                                   let tok = c.queryItems?.first(where: { $0.name == "token" })?.value {
+                                    address = addr
+                                    pairingToken = tok
+                                }
+                            } else if s.contains("://") || (s.contains(".") && s.contains(":")) {
+                                address = s
+                            } else {
+                                pairingToken = s
+                            }
+                        }
+                    } label: {
+                        Label("Paste from clipboard", systemImage: "doc.on.clipboard")
+                    }
+                    .buttonStyle(PillButton(kind: .subtle))
 
                     if let failure {
                         HStack(alignment: .top, spacing: 8) {

@@ -159,6 +159,27 @@ struct PairingView: View {
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .focused($focus, equals: .token).submitLabel(.go).onSubmit { focus = nil; Task { await app.connect() } }
 
+                // One-tap paste from PC (token / URL copied from localhost:4180/pair)
+                HStack(spacing: 10) {
+                    Button {
+                        if let s = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty {
+                            // Full tethrx://pair URL or raw token
+                            if s.hasPrefix("tethrx://") || s.contains("token=") {
+                                handleScanned(s)
+                            } else if s.contains("://") || s.contains(":") {
+                                app.baseURLString = s
+                            } else {
+                                app.token = s
+                            }
+                            Haptics.tap()
+                        }
+                    } label: {
+                        Label("Paste from clipboard", systemImage: "doc.on.clipboard")
+                    }
+                    .buttonStyle(PillButton(kind: .subtle))
+                    Spacer(minLength: 0)
+                }
+
                 Button { focus = nil; Task { await app.connect() } } label: {
                     HStack(spacing: 10) {
                         if app.connecting { ProgressView().controlSize(.small).tint(.white) }

@@ -10,9 +10,14 @@ struct ChatView: View {
     @State private var showDetails = false
     @State private var showGit = false
     @State private var atBottom = true
+    @State private var composerExpanded = false
     @FocusState private var composerFocused: Bool
 
     private var name: String { vm.session.displayName }
+    private var clipboardHasText: Bool {
+        UIPasteboard.general.hasStrings
+    }
+    private var draftKey: String { "draft.\(vm.session.id)" }
 
     var body: some View {
         ZStack {
@@ -25,6 +30,15 @@ struct ChatView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .grokBar()
+        .onAppear {
+            // Restore unsent draft for this session (iPad multitasking / app switch).
+            if draft.isEmpty, let saved = UserDefaults.standard.string(forKey: draftKey), !saved.isEmpty {
+                draft = saved
+            }
+        }
+        .onChange(of: draft) { _, v in
+            UserDefaults.standard.set(v, forKey: draftKey)
+        }
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
@@ -156,6 +170,51 @@ struct ChatView: View {
             snippetsRow
             chatControls
             commandPalette
+            // Paste / expand chips — Feras iPad workflow (clipboard from Termius, long logs)
+            HStack(spacing: 8) {
+                Button { pasteClipboard() } label: {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                        .font(Grok.mono(11, .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(clipboardHasText ? Grok.textDim : Grok.textFaint)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
+                .accessibilityLabel("Paste from clipboard")
+                Button {
+                    composerExpanded.toggle()
+                    composerFocused = true
+                } label: {
+                    Label(composerExpanded ? "Compact" : "Expand",
+                          systemImage: composerExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(Grok.mono(11, .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Grok.textDim)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
+                if !draft.isEmpty {
+                    Button {
+                        draft = ""
+                        UserDefaults.standard.removeObject(forKey: draftKey)
+                    } label: {
+                        Label("Clear", systemImage: "xmark")
+                            .font(Grok.mono(11, .medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Grok.textFaint)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                }
+                Spacer(minLength: 0)
+                if draft.count > 80 {
+                    Text("\(draft.count) chars")
+                        .font(Grok.mono(10))
+                        .foregroundStyle(Grok.textFaint)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+
             HStack(alignment: .bottom, spacing: 10) {
                 HStack(alignment: .top, spacing: 8) {
                     Text(">").font(Grok.mono(15, .bold)).foregroundStyle(Grok.accent).padding(.top, 2)
@@ -164,8 +223,11 @@ struct ChatView: View {
                               axis: .vertical)
                         .font(Grok.mono(14))
                         .foregroundStyle(Grok.text)
-                        .lineLimit(1...5)
+                        .lineLimit(composerExpanded ? 8...24 : 1...8)
                         .focused($composerFocused)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        // iPad hardware keyboard: Return still inserts newline; send via toolbar/button.
                     if dictation.supported {
                         Button { dictation.toggle(base: draft) } label: {
                             Image(systemName: dictation.isRecording ? "waveform" : "mic")
@@ -188,6 +250,22 @@ struct ChatView: View {
         }
         .background(Grok.bg)
         .onChange(of: dictation.transcript) { _, v in if dictation.isRecording { draft = v } }
+    }
+
+    /// Paste clipboard into composer. Empty draft → replace; else append with blank line.
+    private func pasteClipboard() {
+        guard let clip = UIPasteboard.general.string, !clip.isEmpty else {
+            Haptics.tap()
+            return
+        }
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            draft = clip
+        } else {
+            draft = draft.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + clip
+        }
+        composerFocused = true
+        if clip.count > 400 { composerExpanded = true }
+        Haptics.tap()
     }
 
     // Failures here used to be written to vm.errorMessage and never shown, so a
@@ -404,6 +482,7 @@ struct ChatView: View {
             }
         }
         draft = ""
+        UserDefaults.standard.removeObject(forKey: draftKey)
         Task { await vm.send(text) }
     }
 
