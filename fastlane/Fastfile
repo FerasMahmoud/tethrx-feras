@@ -17,24 +17,61 @@ platform :ios do
       key: ENV.fetch("ASC_KEY")
     )
 
-    # Register bundle IDs on Developer portal (required before match profiles)
-    [
-      ["uk.firashome.tethrx", "TethrX Feras"],
-      ["uk.firashome.tethrx.widget", "TethrX Feras Widget"]
-    ].each do |bid, name|
-      existing = Spaceship::ConnectAPI::BundleId.find(bid)
-      if existing
-        UI.success("Bundle ID exists: #{bid}")
-      else
-        UI.message("Creating Bundle ID #{bid} …")
-        Spaceship::ConnectAPI::BundleId.create(
+    # Register bundle IDs + capabilities (Push + App Groups) before match
+    def ensure_bundle!(identifier, name, capabilities:)
+      bid = Spaceship::ConnectAPI::BundleId.find(identifier)
+      unless bid
+        UI.message("Creating Bundle ID #{identifier} …")
+        bid = Spaceship::ConnectAPI::BundleId.create(
           name: name,
-          identifier: bid,
+          identifier: identifier,
           platform: "IOS"
         )
       end
-    rescue => e
-      UI.important("BundleId #{bid}: #{e.message}")
+      capabilities.each do |cap|
+        begin
+          bid.create_capability(cap)
+          UI.success("Enabled #{cap} on #{identifier}")
+        rescue => e
+          # already enabled is fine
+          UI.important("#{identifier} capability #{cap}: #{e.message}")
+        end
+      end
+      bid
+    end
+
+    app_bid = ensure_bundle!(
+      "uk.firashome.tethrx",
+      "TethrX Feras",
+      capabilities: [
+        Spaceship::ConnectAPI::BundleIdCapability::Type::PUSH_NOTIFICATIONS,
+        Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
+      ]
+    )
+    ensure_bundle!(
+      "uk.firashome.tethrx.widget",
+      "TethrX Feras Widget",
+      capabilities: [
+        Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
+      ]
+    )
+
+    # Bind app group identifier on both bundle IDs
+    begin
+      [app_bid, Spaceship::ConnectAPI::BundleId.find("uk.firashome.tethrx.widget")].compact.each do |bid|
+        bid.create_capability(
+          Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS,
+          settings: [{
+            key: Spaceship::ConnectAPI::BundleIdCapability::Settings::APP_GROUP_IDENTIFIERS,
+            options: [{
+              key: "group.uk.firashome.tethrx",
+              enabled: true
+            }]
+          }]
+        )
+      rescue => e
+        UI.important("App Group bind: #{e.message}")
+      end
     end
 
     # App Store Connect app record (needs Admin; soft-fail if key cannot CREATE)
