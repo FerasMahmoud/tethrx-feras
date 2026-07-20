@@ -1,0 +1,6 @@
+git_url(ENV.fetch("MATCH_GIT_URL"))
+storage_mode("git")
+type("appstore")
+app_identifier(["uk.firashome.tethrx", "uk.firashome.tethrx.widget"])
+username("") # API key auth
+team_id("3V4NW789C6")

@@ -1,0 +1,15 @@
+.DS_Store
+DerivedData/
+build/
+*.ipa
+*.xcarchive
+*.mobileprovision
+*.p12
+*.p8
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+.env
+.grok-remote/
+node_modules/

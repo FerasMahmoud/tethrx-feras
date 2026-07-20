@@ -1,0 +1,53 @@
+name: TestFlight
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  testflight:
+    runs-on: macos-latest
+    env:
+      KC_NAME: build.keychain-db
+      KC_PASS: kc_pass_123
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app || sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install fastlane
+        run: brew install fastlane
+
+      - name: Setup build keychain
+        run: |
+          security create-keychain -p "$KC_PASS" "$KC_NAME"
+          security default-keychain -s "$KC_NAME"
+          security unlock-keychain -p "$KC_PASS" "$KC_NAME"
+          security set-keychain-settings -u "$KC_NAME"
+
+      - name: Build, sign & upload
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_BASIC_AUTH: ${{ secrets.MATCH_GIT_BASIC_AUTH }}
+          MATCH_KEYCHAIN_NAME: ${{ env.KC_NAME }}
+          MATCH_KEYCHAIN_PASSWORD: ${{ env.KC_PASS }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          fastlane beta
+
+      - name: Upload IPA artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TethrX-Feras-ipa
+          path: |
+            *.ipa
+            **/*.ipa
+          if-no-files-found: ignore
+          retention-days: 14
