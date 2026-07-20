@@ -111,11 +111,12 @@ platform :ios do
     gym(
       scheme: "GrokRemote",
       project: "ios/GrokRemote.xcodeproj",
-      export_method: "app-store",
+      # Xcode 16+ wants app-store-connect (not app-store)
+      export_method: "app-store-connect",
       clean: true,
       include_bitcode: false,
       export_options: {
-        method: "app-store",
+        method: "app-store-connect",
         signingStyle: "manual",
         teamID: "3V4NW789C6",
         provisioningProfiles: {
