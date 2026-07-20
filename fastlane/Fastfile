@@ -79,7 +79,7 @@ platform :ios do
       type: "appstore",
       app_identifier: ["uk.firashome.tethrx", "uk.firashome.tethrx.widget"],
       readonly: false,
-      force: true,
+      force: false,
       api_key: api_key
     )
 
@@ -111,8 +111,8 @@ platform :ios do
     gym(
       scheme: "GrokRemote",
       project: "ios/GrokRemote.xcodeproj",
-      # Xcode 16+ wants app-store-connect (not app-store)
-      export_method: "app-store-connect",
+      # gym API still says "app-store"; Xcode 16 exportOptions wants "app-store-connect"
+      export_method: "app-store",
       clean: true,
       include_bitcode: false,
       export_options: {
