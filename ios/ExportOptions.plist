@@ -10,10 +10,6 @@
   <string>manual</string>
   <key>uploadSymbols</key>
   <true/>
-  <key>destination</key>
-  <string>export</string>
-  <key>manageAppVersionAndBuildNumber</key>
-  <false/>
   <key>provisioningProfiles</key>
   <dict>
     <key>uk.firashome.tethrx</key>
