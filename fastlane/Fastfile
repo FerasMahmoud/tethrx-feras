@@ -124,14 +124,17 @@ platform :ios do
     )
 
     archive_path = lane_context[SharedValues::XCODEBUILD_ARCHIVE]
-    export_dir = File.expand_path("build/export")
+    root = File.expand_path("..", __dir__)
+    export_dir = File.join(root, "build", "export")
+    export_plist = File.join(root, "ios", "ExportOptions.plist")
+    UI.user_error!("Missing #{export_plist}") unless File.exist?(export_plist)
     FileUtils.rm_rf(export_dir)
     FileUtils.mkdir_p(export_dir)
     sh(
       "xcodebuild", "-exportArchive",
       "-archivePath", archive_path,
       "-exportPath", export_dir,
-      "-exportOptionsPlist", "ios/ExportOptions.plist"
+      "-exportOptionsPlist", export_plist
     )
     ipa = Dir["#{export_dir}/*.ipa"].first
     UI.user_error!("No IPA after export") unless ipa
