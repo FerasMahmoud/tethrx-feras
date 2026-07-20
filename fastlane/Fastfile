@@ -56,23 +56,6 @@ platform :ios do
       ]
     )
 
-    # Bind app group identifier on both bundle IDs
-    begin
-      [app_bid, Spaceship::ConnectAPI::BundleId.find("uk.firashome.tethrx.widget")].compact.each do |bid|
-        bid.create_capability(
-          Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS,
-          settings: [{
-            key: Spaceship::ConnectAPI::BundleIdCapability::Settings::APP_GROUP_IDENTIFIERS,
-            options: [{
-              key: "group.uk.firashome.tethrx",
-              enabled: true
-            }]
-          }]
-        )
-      rescue => e
-        UI.important("App Group bind: #{e.message}")
-      end
-    end
 
     # App Store Connect app record (needs Admin; soft-fail if key cannot CREATE)
     begin
@@ -91,11 +74,12 @@ platform :ios do
       UI.important("ASC app ensure: #{e.message}")
     end
 
-    # Certs + profiles for app + widget
+    # Certs + profiles (force regenerate so new capabilities land in profiles)
     match(
       type: "appstore",
       app_identifier: ["uk.firashome.tethrx", "uk.firashome.tethrx.widget"],
       readonly: false,
+      force: true,
       api_key: api_key
     )
 
