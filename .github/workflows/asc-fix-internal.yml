@@ -1,0 +1,120 @@
+name: ASC fix internal testers
+on:
+  workflow_dispatch:
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add Feras as internal tester + external fallback
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          pip install -q PyJWT cryptography requests
+          python3 <<'PY'
+          import time, jwt, requests, os, json
+          key_id, issuer, key = os.environ["ASC_KEY_ID"], os.environ["ASC_ISSUER_ID"], os.environ["ASC_KEY"]
+          now = int(time.time())
+          token = jwt.encode({"iss": issuer, "iat": now, "exp": now+1100, "aud": "appstoreconnect-v1"},
+                             key, algorithm="ES256", headers={"kid": key_id})
+          H = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+          B = "https://api.appstoreconnect.apple.com/v1"
+          APP, BUILD, EMAIL = "6792920176", "874b95e7-8203-434a-8153-4edcf959c4b1", "feras299@gmail.com"
+
+          def get(p, **kw):
+              r = requests.get(B+p, headers=H, timeout=60, **kw); print("GET", p, r.status_code); return r
+          def post(p, body):
+              r = requests.post(B+p, headers=H, json=body, timeout=60); print("POST", p, r.status_code, r.text[:900]); return r
+          def patch(p, body):
+              r = requests.patch(B+p, headers=H, json=body, timeout=60); print("PATCH", p, r.status_code, r.text[:600]); return r
+
+          # list groups
+          groups = get(f"/apps/{APP}/betaGroups").json().get("data") or []
+          print("groups", [(g["id"], g["attributes"]) for g in groups])
+          internal = next((g for g in groups if g["attributes"].get("isInternalGroup")), None)
+          external = next((g for g in groups if not g["attributes"].get("isInternalGroup")), None)
+
+          # ensure internal has hasAccessToAllBuilds
+          if internal:
+              iid = internal["id"]
+              if not internal["attributes"].get("hasAccessToAllBuilds"):
+                  patch(f"/betaGroups/{iid}", {"data": {"type": "betaGroups", "id": iid,
+                      "attributes": {"hasAccessToAllBuilds": True}}})
+          else:
+              r = post("/betaGroups", {"data": {"type": "betaGroups",
+                  "attributes": {"name": "Internal", "isInternalGroup": True, "hasAccessToAllBuilds": True},
+                  "relationships": {"app": {"data": {"type": "apps", "id": APP}}}}})
+              iid = r.json().get("data", {}).get("id") if r.status_code in (200,201) else None
+              internal = {"id": iid} if iid else None
+
+          # Create EXTERNAL group for public TestFlight invite (works without ASC team role quirks)
+          if not external:
+              r = post("/betaGroups", {"data": {"type": "betaGroups",
+                  "attributes": {"name": "Feras", "isInternalGroup": False, "publicLinkEnabled": False},
+                  "relationships": {"app": {"data": {"type": "apps", "id": APP}}}}})
+              if r.status_code in (200,201):
+                  external = r.json()["data"]
+          eid = external["id"] if external else None
+          print("internal", internal and internal.get("id"), "external", eid)
+
+          # Create beta tester (no apps relationship)
+          r = get("/betaTesters", params={"filter[email]": EMAIL})
+          testers = r.json().get("data") or []
+          tid = testers[0]["id"] if testers else None
+          print("existing_tester", tid, r.text[:400])
+          if not tid:
+              r = post("/betaTesters", {"data": {"type": "betaTesters",
+                  "attributes": {"email": EMAIL, "firstName": "Feras", "lastName": "Mahmoud"},
+                  "relationships": {
+                      "betaGroups": {"data": ([{"type": "betaGroups", "id": internal["id"]}] if internal else []) +
+                                             ([{"type": "betaGroups", "id": eid}] if eid else [])}
+                  }}})
+              if r.status_code in (200,201):
+                  tid = r.json()["data"]["id"]
+          if tid and internal:
+              post(f"/betaGroups/{internal['id']}/relationships/betaTesters",
+                   {"data": [{"type": "betaTesters", "id": tid}]})
+          if tid and eid:
+              post(f"/betaGroups/{eid}/relationships/betaTesters",
+                   {"data": [{"type": "betaTesters", "id": tid}]})
+
+          # Assign build to EXTERNAL group (internal auto via hasAccessToAllBuilds)
+          if eid:
+              post(f"/betaGroups/{eid}/relationships/builds",
+                   {"data": [{"type": "builds", "id": BUILD}]})
+
+          # Individual tester on build
+          if tid:
+              post(f"/builds/{BUILD}/relationships/individualTesters",
+                   {"data": [{"type": "betaTesters", "id": tid}]})
+
+          # Beta app information required for external
+          r = get(f"/apps/{APP}/betaAppLocalizations")
+          print("betaAppLocalizations", r.status_code, r.text[:600])
+          locs = r.json().get("data") or []
+          if not locs:
+              post("/betaAppLocalizations", {"data": {"type": "betaAppLocalizations",
+                  "attributes": {"locale": "en-GB", "description": "Personal Grok Build remote for Feras-PC. Connects only to your own bridge.",
+                                 "feedbackEmail": EMAIL, "whatToTest": "Pair with https://tethrx.firashome.uk and run a session."},
+                  "relationships": {"app": {"data": {"type": "apps", "id": APP}}}}})
+          else:
+              lid = locs[0]["id"]
+              patch(f"/betaAppLocalizations/{lid}", {"data": {"type": "betaAppLocalizations", "id": lid,
+                  "attributes": {"description": "Personal Grok Build remote for Feras-PC.",
+                                 "feedbackEmail": EMAIL, "whatToTest": "Pair with https://tethrx.firashome.uk"}}})
+
+          # Submit external for beta review if assigned
+          r = get(f"/builds/{BUILD}/betaAppReviewSubmission")
+          print("review_submission", r.status_code, r.text[:500])
+          if r.status_code == 404 or not (r.json().get("data")):
+              post("/betaAppReviewSubmissions", {"data": {"type": "betaAppReviewSubmissions",
+                  "relationships": {"build": {"data": {"type": "builds", "id": BUILD}}}}})
+
+          # Final state
+          r = get(f"/builds/{BUILD}/buildBetaDetail")
+          print("FINAL", json.dumps(r.json(), indent=2)[:1500])
+          r = get(f"/apps/{APP}/betaGroups")
+          print("FINAL_GROUPS", json.dumps(r.json(), indent=2)[:2000])
+          print("DONE")
+          PY
