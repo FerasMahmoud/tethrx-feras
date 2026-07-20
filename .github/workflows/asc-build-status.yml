@@ -1,0 +1,69 @@
+name: ASC build status
+on:
+  workflow_dispatch:
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List builds for TethrX Feras
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          pip install -q PyJWT cryptography requests
+          python3 <<'PY'
+          import time, jwt, requests, os, json
+          key_id = os.environ["ASC_KEY_ID"]
+          issuer = os.environ["ASC_ISSUER_ID"]
+          key = os.environ["ASC_KEY"]
+          now = int(time.time())
+          token = jwt.encode(
+              {"iss": issuer, "iat": now, "exp": now + 1100, "aud": "appstoreconnect-v1"},
+              key, algorithm="ES256", headers={"kid": key_id, "typ": "JWT"},
+          )
+          H = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+          base = "https://api.appstoreconnect.apple.com/v1"
+
+          # App by bundle id
+          r = requests.get(f"{base}/apps", headers=H, params={"filter[bundleId]": "uk.firashome.tethrx"}, timeout=60)
+          print("apps_status", r.status_code)
+          apps = r.json()
+          print(json.dumps(apps, indent=2)[:2000])
+          if not apps.get("data"):
+              # try by id we know
+              app_id = "6792920176"
+          else:
+              app_id = apps["data"][0]["id"]
+              print("APP", app_id, apps["data"][0]["attributes"].get("name"))
+
+          r = requests.get(f"{base}/builds", headers=H, params={
+              "filter[app]": app_id,
+              "sort": "-uploadedDate",
+              "limit": 10,
+              "include": "buildBetaDetail,preReleaseVersion",
+          }, timeout=60)
+          print("builds_status", r.status_code)
+          data = r.json()
+          print(json.dumps(data, indent=2)[:8000])
+
+          # beta groups
+          r = requests.get(f"{base}/apps/{app_id}/betaGroups", headers=H, timeout=60)
+          print("betaGroups", r.status_code, json.dumps(r.json(), indent=2)[:2000])
+
+          # app store versions / missing compliance
+          r = requests.get(f"{base}/builds", headers=H, params={
+              "filter[app]": app_id,
+              "limit": 5,
+          }, timeout=60)
+          for b in r.json().get("data", []):
+              bid = b["id"]
+              attrs = b["attributes"]
+              print("---BUILD---", bid)
+              print(" version:", attrs.get("version"), "uploaded:", attrs.get("uploadedDate"))
+              print(" processingState:", attrs.get("processingState"))
+              print(" expired:", attrs.get("expired"), "usesNonExemptEncryption:", attrs.get("usesNonExemptEncryption"))
+              # buildBetaDetail
+              r2 = requests.get(f"{base}/builds/{bid}/buildBetaDetail", headers=H, timeout=60)
+              print(" betaDetail:", r2.status_code, r2.text[:500])
+          PY
