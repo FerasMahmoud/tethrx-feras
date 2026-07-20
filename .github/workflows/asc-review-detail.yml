@@ -1,0 +1,70 @@
+name: ASC beta review detail
+on:
+  workflow_dispatch:
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          pip install -q PyJWT cryptography requests
+          python3 <<'PY'
+          import time, jwt, requests, os, json
+          key_id, issuer, key = os.environ["ASC_KEY_ID"], os.environ["ASC_ISSUER_ID"], os.environ["ASC_KEY"]
+          now = int(time.time())
+          token = jwt.encode({"iss": issuer, "iat": now, "exp": now+1100, "aud": "appstoreconnect-v1"},
+                             key, algorithm="ES256", headers={"kid": key_id})
+          H = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+          B = "https://api.appstoreconnect.apple.com/v1"
+          APP, BUILD = "6792920176", "874b95e7-8203-434a-8153-4edcf959c4b1"
+          EMAIL = "feras299@gmail.com"
+
+          def get(p, **kw):
+              r = requests.get(B+p, headers=H, timeout=60, **kw); print("GET", p, r.status_code, r.text[:700]); return r
+          def post(p, body):
+              r = requests.post(B+p, headers=H, json=body, timeout=60); print("POST", p, r.status_code, r.text[:900]); return r
+          def patch(p, body):
+              r = requests.patch(B+p, headers=H, json=body, timeout=60); print("PATCH", p, r.status_code, r.text[:700]); return r
+
+          r = get(f"/apps/{APP}/betaAppReviewDetail")
+          data = r.json().get("data")
+          if not data:
+              post("/betaAppReviewDetails", {"data": {"type": "betaAppReviewDetails",
+                  "attributes": {
+                      "contactFirstName": "Feras",
+                      "contactLastName": "Mahmoud",
+                      "contactPhone": "+966500000000",
+                      "contactEmail": EMAIL,
+                      "notes": "Personal utility. Requires self-hosted bridge on developer PC. No login in app beyond pairing token from own machine.",
+                      "demoAccountName": None,
+                      "demoAccountPassword": None,
+                      "demoAccountRequired": False,
+                  },
+                  "relationships": {"app": {"data": {"type": "apps", "id": APP}}}}})
+          else:
+              did = data["id"]
+              patch(f"/betaAppReviewDetails/{did}", {"data": {"type": "betaAppReviewDetails", "id": did,
+                  "attributes": {
+                      "contactFirstName": "Feras",
+                      "contactLastName": "Mahmoud",
+                      "contactPhone": "+966500000000",
+                      "contactEmail": EMAIL,
+                      "notes": "Personal utility. Pair with self-hosted bridge only.",
+                      "demoAccountRequired": False,
+                  }}})
+
+          # re-submit review
+          r = get(f"/builds/{BUILD}/betaAppReviewSubmission")
+          if not r.json().get("data"):
+              post("/betaAppReviewSubmissions", {"data": {"type": "betaAppReviewSubmissions",
+                  "relationships": {"build": {"data": {"type": "builds", "id": BUILD}}}}})
+
+          # list individual testers
+          r = get(f"/builds/{BUILD}/individualTesters")
+          r = get(f"/builds/{BUILD}/buildBetaDetail")
+          print("STATE", json.dumps(r.json(), indent=2)[:1000])
+          print("DONE")
+          PY
