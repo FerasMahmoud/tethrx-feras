@@ -11,19 +11,40 @@ platform :ios do
       duration: 1200
     )
 
-    # Create App Store Connect app if missing (needs Admin API key)
+    Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
+      key_id: ENV.fetch("ASC_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+      key: ENV.fetch("ASC_KEY")
+    )
+
+    # Register bundle IDs on Developer portal (required before match profiles)
+    [
+      ["uk.firashome.tethrx", "TethrX Feras"],
+      ["uk.firashome.tethrx.widget", "TethrX Feras Widget"]
+    ].each do |bid, name|
+      existing = Spaceship::ConnectAPI::BundleId.find(bid)
+      if existing
+        UI.success("Bundle ID exists: #{bid}")
+      else
+        UI.message("Creating Bundle ID #{bid} …")
+        Spaceship::ConnectAPI::BundleId.create(
+          name: name,
+          identifier: bid,
+          platform: "IOS"
+        )
+      end
+    rescue => e
+      UI.important("BundleId #{bid}: #{e.message}")
+    end
+
+    # App Store Connect app record (needs Admin; soft-fail if key cannot CREATE)
     begin
-      Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.create(
-        key_id: ENV.fetch("ASC_KEY_ID"),
-        issuer_id: ENV.fetch("ASC_ISSUER_ID"),
-        key: ENV.fetch("ASC_KEY")
-      )
       if Spaceship::ConnectAPI::App.find("uk.firashome.tethrx").nil?
         UI.message("Creating ASC app uk.firashome.tethrx …")
         Spaceship::ConnectAPI::App.create(
           name: "TethrX Feras",
           version_string: "1.0",
-          sku: "firashome-tethrx",
+          sku: "firashome-tethrx-#{Time.now.to_i}",
           primary_locale: "en-US",
           bundle_id: "uk.firashome.tethrx",
           platforms: ["IOS"]
@@ -33,11 +54,11 @@ platform :ios do
       UI.important("ASC app ensure: #{e.message}")
     end
 
-    # Certs + profiles for app + widget (create on first run if match allows)
+    # Certs + profiles for app + widget
     match(
       type: "appstore",
       app_identifier: ["uk.firashome.tethrx", "uk.firashome.tethrx.widget"],
-      readonly: is_ci ? false : false,
+      readonly: false,
       api_key: api_key
     )
 
