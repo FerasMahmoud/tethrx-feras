@@ -17,7 +17,8 @@ platform :ios do
       key: ENV.fetch("ASC_KEY")
     )
 
-    # Register bundle IDs + capabilities (Push + App Groups) before match
+    # Register bundle IDs + Push capability before match.
+    # App Groups deferred: profiles must include group.uk.firashome.tethrx first.
     def ensure_bundle!(identifier, name, capabilities:)
       bid = Spaceship::ConnectAPI::BundleId.find(identifier)
       unless bid
@@ -40,22 +41,18 @@ platform :ios do
       bid
     end
 
-    app_bid = ensure_bundle!(
+    ensure_bundle!(
       "uk.firashome.tethrx",
       "TethrX Feras",
       capabilities: [
-        Spaceship::ConnectAPI::BundleIdCapability::Type::PUSH_NOTIFICATIONS,
-        Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
+        Spaceship::ConnectAPI::BundleIdCapability::Type::PUSH_NOTIFICATIONS
       ]
     )
     ensure_bundle!(
       "uk.firashome.tethrx.widget",
       "TethrX Feras Widget",
-      capabilities: [
-        Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
-      ]
+      capabilities: []
     )
-
 
     # App Store Connect app record (needs Admin; soft-fail if key cannot CREATE)
     begin
@@ -74,12 +71,12 @@ platform :ios do
       UI.important("ASC app ensure: #{e.message}")
     end
 
-    # Certs + profiles (force regenerate so new capabilities land in profiles)
+    # Force regenerate profiles so aps-environment lands in the main app profile.
     match(
       type: "appstore",
       app_identifier: ["uk.firashome.tethrx", "uk.firashome.tethrx.widget"],
       readonly: false,
-      force: false,
+      force: true,
       api_key: api_key
     )
 

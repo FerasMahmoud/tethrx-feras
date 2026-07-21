@@ -2,9 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.application-groups</key>
-	<array>
-		<string>group.uk.firashome.tethrx</string>
-	</array>
+	<!-- Empty until App Group is bound on the widget profile. WidgetBridge no-ops without suite. -->
 </dict>
 </plist>
