@@ -3,7 +3,7 @@
 // the route layer turns into 4xx.
 
 import { readdirSync, statSync, lstatSync, existsSync, readFileSync } from "node:fs";
-import { join, resolve, dirname, basename, extname } from "node:path";
+import { join, resolve, dirname, basename, extname, sep } from "node:path";
 import { homedir } from "node:os";
 
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp"]);
@@ -15,6 +15,33 @@ function expandHome(p) {
   if (s === "~") return homedir();
   if (s.startsWith("~/") || s.startsWith("~\\")) return join(homedir(), s.slice(2));
   return s;
+}
+
+/** Paths the phone may list/read — home, tmp, and common WSL mounts only. */
+const ALLOWED_ROOTS = () => {
+  const h = homedir();
+  return [h, "/tmp", "/var/tmp", "/mnt/d", "/mnt/c/Users"].filter(Boolean);
+};
+
+export function assertReadablePath(absPath) {
+  const path = resolve(expandHome(absPath));
+  const roots = ALLOWED_ROOTS();
+  const ok = roots.some((root) => {
+    const r = resolve(root);
+    return path === r || path.startsWith(r + sep) || path.startsWith(r + "/");
+  });
+  if (!ok) {
+    const e = new Error("path outside allowed roots");
+    e.code = "EACCES";
+    throw e;
+  }
+  // Block path tricks
+  if (path.includes("\0")) {
+    const e = new Error("invalid path");
+    e.code = "EINVAL";
+    throw e;
+  }
+  return path;
 }
 
 function entryType(dirent, parent) {
@@ -45,7 +72,7 @@ function fileSize(parent, name) {
  * @returns {{ path: string, entries: Array<{ name: string, type: 'file'|'dir', size?: number }> }}
  */
 export function listDir(absPath, { limit = 200, showHidden = false } = {}) {
-  const path = resolve(expandHome(absPath || homedir()));
+  const path = assertReadablePath(absPath || homedir());
   let names;
   try {
     names = readdirSync(path, { withFileTypes: true });
@@ -103,16 +130,12 @@ function searchAbsolute(query, { limit, showHidden }) {
   let prefix;
 
   if (query.endsWith("/") || query.endsWith("\\")) {
-    parent = resolve(expanded);
+    parent = assertReadablePath(expanded);
     prefix = "";
   } else {
     // /home/fer → parent=/home, prefix=fer
-    // Keep trailing-slash-less paths that already exist as dirs as "list under me"
-    // only when the user typed a complete dir name without a trailing slash AND
-    // the basename matches fully — still treat as parent+prefix for consistency
-    // (prefix = basename, which matches the dir itself when listing parent).
     const resolved = resolve(expanded);
-    parent = dirname(resolved);
+    parent = assertReadablePath(dirname(resolved));
     prefix = basename(resolved);
   }
 
@@ -145,6 +168,12 @@ function searchRelative(prefix, base, { limit, showHidden }) {
   /** @type {Array<{ path: string, type: 'file'|'dir' }>} */
   const results = [];
   const prefLower = prefix.toLowerCase();
+  let safeBase;
+  try {
+    safeBase = assertReadablePath(base);
+  } catch {
+    return results;
+  }
 
   function walk(dir, depth) {
     if (results.length >= limit || depth > 3) return;
@@ -166,7 +195,7 @@ function searchRelative(prefix, base, { limit, showHidden }) {
     }
   }
 
-  walk(base, 1);
+  walk(safeBase, 1);
   return results;
 }
 
@@ -175,7 +204,7 @@ function searchRelative(prefix, base, { limit, showHidden }) {
  * Returns { path, mime, data: base64, size } or throws.
  */
 export function readFileBase64(absPath, { maxBytes = MAX_FILE_BYTES } = {}) {
-  const path = resolve(expandHome(absPath));
+  const path = assertReadablePath(absPath);
   if (!existsSync(path)) {
     const e = new Error("file not found");
     e.code = "ENOENT";

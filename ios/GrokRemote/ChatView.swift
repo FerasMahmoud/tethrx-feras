@@ -118,7 +118,7 @@ struct ChatView: View {
         GeometryReader { outer in
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
+                    LazyVStack(alignment: .leading, spacing: 12) {
                         ForEach(vm.items) { item in
                             switch item.role {
                             case .permission:
@@ -130,8 +130,21 @@ struct ChatView: View {
                                     Task { await vm.decidePlan(item, approved: approved) }
                                 }.id(item.id)
                             default:
-                                ChatBubble(item: item).id(item.id)
-                                    .contextMenu { copyButton(item.text) }
+                                ChatBubble(
+                                    item: item,
+                                    forceExpanded: vm.busy && item.id == vm.items.last(where: { $0.role == .assistant })?.id
+                                ).id(item.id)
+                                    .contextMenu {
+                                        copyButton(item.text)
+                                        if item.role == .assistant || item.role == .user {
+                                            Button {
+                                                UIPasteboard.general.string = item.text
+                                                Haptics.tap()
+                                            } label: {
+                                                Label("Copy full text", systemImage: "doc.on.doc")
+                                            }
+                                        }
+                                    }
                             }
                         }
                         if showTyping { TypingIndicator().id("typing") }
@@ -792,7 +805,10 @@ struct TypingIndicator: View {
 /// Renders one conversation line in the console style.
 struct ChatBubble: View {
     let item: ChatItem
+    /// While the latest assistant message is still streaming, keep it open.
+    var forceExpanded: Bool = false
     @State private var viewerImage: IdentifiedImage?
+    @State private var expanded = false
 
     /// Full markdown (headings, lists, links). Tables handled separately.
     static func markdown(_ s: String) -> AttributedString {
@@ -889,6 +905,16 @@ struct ChatBubble: View {
         return sep.allSatisfy { $0 == "-" || $0 == ":" }
     }
 
+    private var previewText: String {
+        let t = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty { return item.images.isEmpty ? "…" : "\(item.images.count) image(s)" }
+        let oneLine = t.replacingOccurrences(of: "\n+", with: " ", options: .regularExpression)
+        if oneLine.count <= 160 { return oneLine }
+        return String(oneLine.prefix(157)) + "…"
+    }
+
+    private var isOpen: Bool { forceExpanded || expanded }
+
     var body: some View {
         switch item.role {
         case .user:
@@ -914,44 +940,127 @@ struct ChatBubble: View {
             }
 
         case .assistant:
-            VStack(alignment: .leading, spacing: 10) {
-                Eyebrow("GROK")
-                if !item.images.isEmpty {
-                    ChatImageStrip(images: item.images) { viewerImage = $0 }
+            VStack(alignment: .leading, spacing: 0) {
+                // Header row — always visible; tap toggles expand
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() }
+                    Haptics.tap()
+                } label: {
+                    HStack(spacing: 8) {
+                        Eyebrow("GROK")
+                        if forceExpanded {
+                            Text("LIVE")
+                                .font(Grok.mono(8, .bold))
+                                .foregroundStyle(Grok.bg)
+                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(Grok.accent)
+                                .clipShape(Capsule())
+                        }
+                        if !item.images.isEmpty {
+                            Image(systemName: "photo")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Grok.textFaint)
+                        }
+                        Spacer(minLength: 4)
+                        Image(systemName: isOpen ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Grok.textFaint)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .contentShape(Rectangle())
                 }
-                ForEach(Array(Self.segments(item.text).enumerated()), id: \.offset) { _, seg in
-                    switch seg.kind {
-                    case .code:
-                        CodeBlock(code: seg.text, language: seg.language)
-                    case .table:
-                        MarkdownTable(text: seg.text)
-                    case .prose:
-                        Text(Self.markdown(seg.text))
-                            .font(Grok.sans(15))
-                            .foregroundStyle(Grok.text)
-                            .lineSpacing(4)
-                            .textSelection(.enabled)
+                .buttonStyle(.plain)
+                .accessibilityLabel(isOpen ? "Collapse answer" : "Expand answer")
+
+                if isOpen {
+                    VStack(alignment: .leading, spacing: 10) {
+                        if !item.images.isEmpty {
+                            ChatImageStrip(images: item.images) { viewerImage = $0 }
+                        }
+                        // Only parse heavy markdown when expanded (perf)
+                        ForEach(Array(Self.segments(item.text).enumerated()), id: \.offset) { _, seg in
+                            switch seg.kind {
+                            case .code:
+                                CodeBlock(code: seg.text, language: seg.language)
+                            case .table:
+                                MarkdownTable(text: seg.text)
+                            case .prose:
+                                Text(Self.markdown(seg.text))
+                                    .font(Grok.sans(15))
+                                    .foregroundStyle(Grok.text)
+                                    .lineSpacing(4)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        if !forceExpanded {
+                            collapseToggle
+                        }
+                    }
+                    .padding(.top, 10)
+                } else {
+                    // Collapsed preview — clean scan mode
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !item.images.isEmpty {
+                            ChatImageStrip(images: Array(item.images.prefix(1))) { viewerImage = $0 }
+                        }
+                        Text(previewText)
+                            .font(Grok.sans(14))
+                            .foregroundStyle(Grok.textDim)
+                            .lineLimit(3)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(spacing: 6) {
+                            Text("Tap to expand")
+                                .font(Grok.mono(10, .medium))
+                                .foregroundStyle(Grok.accent)
+                            if item.text.count > 100 {
+                                Text("· \(item.text.count) chars")
+                                    .font(Grok.mono(10))
+                                    .foregroundStyle(Grok.textFaint)
+                            }
+                        }
+                    }
+                    .padding(.top, 8)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.18)) { expanded = true }
+                        Haptics.tap()
                     }
                 }
             }
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Grok.raised.opacity(0.55))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Grok.hairline, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
             .fullScreenCover(item: $viewerImage) { img in
                 ImageViewer(image: img)
             }
 
         case .thought:
-            HStack(alignment: .top, spacing: 10) {
-                Rectangle().fill(Grok.hairlineStrong).frame(width: 2)
+            CollapsibleMeta(
+                title: "THINKING",
+                preview: previewText,
+                defaultExpanded: false
+            ) {
                 Text(item.text)
                     .font(Grok.mono(12))
                     .foregroundStyle(Grok.textDim)
                     .lineSpacing(2)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
 
         case .tool:
-            ToolLine(item: item)
+            CollapsibleMeta(
+                title: "TOOL",
+                preview: item.text,
+                defaultExpanded: false,
+                accent: item.toolStatus == "failed" ? Grok.danger : Grok.textFaint
+            ) {
+                ToolLine(item: item)
+            }
 
         case .permission, .plan:
             EmptyView()   // rendered by PermissionCard / PlanCard in the transcript
@@ -972,6 +1081,80 @@ struct ChatBubble: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Grok.danger.opacity(0.4), lineWidth: 1))
         }
+    }
+
+    private var collapseToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) { expanded = false }
+            Haptics.tap()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 10, weight: .bold))
+                Text("Collapse")
+                    .font(Grok.mono(11, .medium))
+            }
+            .foregroundStyle(Grok.textFaint)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Compact collapsible shell for thinking / tools — default collapsed for clean scan.
+struct CollapsibleMeta<Content: View>: View {
+    let title: String
+    let preview: String
+    var defaultExpanded: Bool = false
+    var accent: Color = Grok.textFaint
+    @ViewBuilder var content: () -> Content
+    @State private var open: Bool
+
+    init(title: String, preview: String, defaultExpanded: Bool = false, accent: Color = Grok.textFaint,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.preview = preview
+        self.defaultExpanded = defaultExpanded
+        self.accent = accent
+        self.content = content
+        _open = State(initialValue: defaultExpanded)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { open.toggle() }
+                Haptics.tap()
+            } label: {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(Grok.mono(9, .bold))
+                        .tracking(0.8)
+                        .foregroundStyle(accent)
+                    Text(preview)
+                        .font(Grok.mono(11))
+                        .foregroundStyle(Grok.textFaint)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Image(systemName: open ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Grok.textFaint)
+                }
+                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                content()
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
+            }
+        }
+        .background(Grok.raised.opacity(0.4))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Grok.hairline, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
