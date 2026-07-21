@@ -105,7 +105,9 @@ struct BridgeClient {
         planMode: Bool = false,
         autoApprove: Bool = false,
         resumeGrokSessionId: String? = nil,
-        title: String? = nil
+        title: String? = nil,
+        sessionKind: String? = nil,
+        agentName: String? = nil
     ) async throws -> SessionInfo {
         var body: [String: Any] = [:]
         if let cwd, !cwd.isEmpty { body["cwd"] = cwd }
@@ -116,6 +118,8 @@ struct BridgeClient {
             body["resumeGrokSessionId"] = resumeGrokSessionId
         }
         if let title, !title.isEmpty { body["title"] = title }
+        if let sessionKind, !sessionKind.isEmpty { body["sessionKind"] = sessionKind }
+        if let agentName, !agentName.isEmpty { body["agentName"] = agentName }
         let (data, resp) = try await session.data(for: try request("/api/sessions", method: "POST", json: body))
         try Self.check(resp)
         return try JSONDecoder().decode(SessionInfo.self, from: data)

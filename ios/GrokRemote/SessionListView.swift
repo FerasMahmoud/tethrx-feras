@@ -13,8 +13,13 @@ struct SessionListView: View {
     @State private var folderText = ""
     @State private var collapsed: Set<String> = []
     @State private var query = ""
-    @State private var runningOnly = false
+    /// main | running | subagents — subagents never mix into the default list.
+    @State private var sessionFilter: SessionFilter = .main
     @State private var showSettings = false
+
+    private enum SessionFilter: String, CaseIterable {
+        case main, running, subagents
+    }
     @State private var creatingFolder = false
     @State private var newFolderName = ""
     @State private var showFsBrowser = false
@@ -222,10 +227,11 @@ struct SessionListView: View {
             }
             .padding(.bottom, 10)
 
-            // Filter chips
+            // Filter chips — subagents live in their own tab (not mixed into main).
             HStack(spacing: 8) {
-                filterChip("All", active: !runningOnly) { runningOnly = false }
-                filterChip("Running only", active: runningOnly) { runningOnly = true }
+                filterChip("Main", active: sessionFilter == .main) { sessionFilter = .main }
+                filterChip("Running", active: sessionFilter == .running) { sessionFilter = .running }
+                filterChip("Subagents", active: sessionFilter == .subagents) { sessionFilter = .subagents }
                 Spacer(minLength: 0)
             }
             .padding(.bottom, 12)
@@ -238,9 +244,7 @@ struct SessionListView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 24)
             } else if filteredSessions.isEmpty {
-                Text(runningOnly && query.trimmingCharacters(in: .whitespaces).isEmpty
-                      ? "// no running sessions"
-                      : "// nothing matches \u{201C}\(query)\u{201D}")
+                Text(emptyFilterMessage)
                     .font(Grok.mono(12)).foregroundStyle(Grok.textFaint)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 24)
@@ -269,10 +273,28 @@ struct SessionListView: View {
         }
     }
 
-    // Session list, filtered by running chip + search; unread + recent already sorted in AppState.
+    private var emptyFilterMessage: String {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        if !q.isEmpty { return "// nothing matches \u{201C}\(q)\u{201D}" }
+        switch sessionFilter {
+        case .main: return "// no main sessions"
+        case .running: return "// no running sessions"
+        case .subagents: return "// no subagent sessions"
+        }
+    }
+
+    // Session list: main excludes subagents; Subagents tab is only workers.
+    // Unread + recent already sorted in AppState.
     private var filteredSessions: [SessionInfo] {
         var list = app.sessions
-        if runningOnly { list = list.filter { $0.isRunning } }
+        switch sessionFilter {
+        case .main:
+            list = list.filter { !$0.isSubagentSession }
+        case .running:
+            list = list.filter { $0.isRunning && !$0.isSubagentSession }
+        case .subagents:
+            list = list.filter { $0.isSubagentSession }
+        }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return list }
         return list.filter {
@@ -280,6 +302,7 @@ struct SessionListView: View {
             || ($0.folder?.lowercased().contains(q) ?? false)
             || ($0.cwd?.lowercased().contains(q) ?? false)
             || ($0.lastPreview?.lowercased().contains(q) ?? false)
+            || ($0.agentName?.lowercased().contains(q) ?? false)
             || $0.id.lowercased().hasPrefix(q)
         }
     }
@@ -427,28 +450,42 @@ struct SessionListView: View {
 
     // MARK: Grok CLI resume
 
+    /// CLI resume list follows the same Main / Subagents filter as bridge sessions.
+    private var filteredGrokCli: [GrokCliSession] {
+        switch sessionFilter {
+        case .main, .running:
+            return app.grokCliSessions.filter { !$0.isSubagentSession }
+        case .subagents:
+            return app.grokCliSessions.filter { $0.isSubagentSession }
+        }
+    }
+
     @ViewBuilder
     private var grokCliSection: some View {
-        if !app.grokCliSessions.isEmpty {
+        let list = filteredGrokCli
+        if !list.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 12) {
-                    Eyebrow("GROK CLI (RESUME)")
+                    Eyebrow(sessionFilter == .subagents ? "GROK CLI · SUBAGENTS" : "GROK CLI (RESUME)")
                     Spacer()
-                    Text("\(app.grokCliSessions.count)")
+                    Text("\(list.count)")
                         .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
                 }
                 .padding(.bottom, 12)
 
-                Text("Resume a session from the host Grok CLI store into a bridge session.")
+                Text(sessionFilter == .subagents
+                     ? "Subagent workers from the host Grok CLI. Resume opens them as bridge sessions under Subagents."
+                     : "Resume a main session from the host Grok CLI store. Subagents live under the Subagents filter.")
                     .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
                     .padding(.bottom, 10)
 
-                ForEach(Array(app.grokCliSessions.prefix(12).enumerated()), id: \.element.id) { index, g in
+                ForEach(Array(list.prefix(12).enumerated()), id: \.element.id) { index, g in
                     if index > 0 { Rectangle().fill(Grok.hairline).frame(height: 1) }
                     Button {
                         Haptics.tap()
                         Task {
                             if let s = await app.resumeGrokSession(g) {
+                                if s.isSubagentSession { sessionFilter = .subagents }
                                 path.append(s)
                             }
                         }
@@ -590,6 +627,13 @@ struct GrokCliRow: View {
                 HStack(spacing: 8) {
                     Text(session.id.prefix(8))
                         .font(Grok.mono(11, .medium)).foregroundStyle(Grok.textFaint)
+                    if session.isSubagentSession {
+                        Text((session.agentName?.isEmpty == false ? session.agentName! : "subagent").uppercased())
+                            .font(Grok.mono(8, .bold)).tracking(0.6)
+                            .foregroundStyle(Grok.textFaint)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .overlay(Capsule().stroke(Grok.hairline, lineWidth: 1))
+                    }
                     if session.active == true {
                         HStack(spacing: 5) {
                             Circle().fill(Grok.accent).frame(width: 6, height: 6)
@@ -648,6 +692,13 @@ struct SessionRow: View {
                 HStack(spacing: 8) {
                     Text(session.id.prefix(8))
                         .font(Grok.mono(11, .medium)).foregroundStyle(Grok.textFaint)
+                    if session.isSubagentSession {
+                        Text((session.agentName?.isEmpty == false ? session.agentName! : "subagent").uppercased())
+                            .font(Grok.mono(8, .bold)).tracking(0.6)
+                            .foregroundStyle(Grok.textFaint)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .overlay(Capsule().stroke(Grok.hairline, lineWidth: 1))
+                    }
                     if session.isRunning {
                         HStack(spacing: 5) {
                             Circle().fill(Grok.accent).frame(width: 6, height: 6)

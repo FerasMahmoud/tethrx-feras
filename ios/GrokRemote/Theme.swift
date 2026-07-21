@@ -130,8 +130,10 @@ struct CircleIconButton: View {
                 Circle()
                     .fill(filled ? AnyShapeStyle(Grok.accent) : AnyShapeStyle(Color.clear))
                     .overlay(Circle().stroke(enabled ? Grok.hairlineStrong : Grok.hairline, lineWidth: 1))
+                // "return" is the real enter-key glyph; weight medium reads cleaner than bold.
                 Image(systemName: system)
-                    .font(.system(size: 15, weight: .bold))
+                    .font(.system(size: system == "return" ? 16 : 15,
+                                  weight: system == "return" ? .semibold : .bold))
                     .foregroundStyle(filled ? .black : (danger ? Grok.danger : (enabled ? Grok.text : Grok.textFaint)))
             }
             .frame(width: 40, height: 40)

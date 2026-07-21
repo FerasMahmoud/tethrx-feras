@@ -31,6 +31,15 @@ struct GrokCliSession: Codable, Identifiable, Hashable {
     var lastActiveAt: String?
     var messageCount: Int?
     var active: Bool?
+    /// "main" | "subagent" — Grok spawns workers as subagent sessions.
+    var sessionKind: String?
+    var agentName: String?
+    var isSubagent: Bool?
+
+    var isSubagentSession: Bool {
+        if let isSubagent { return isSubagent }
+        return (sessionKind ?? "main") == "subagent"
+    }
 
     var displayName: String {
         let t = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -58,8 +67,17 @@ struct SessionInfo: Codable, Identifiable, Hashable {
     var lastEventId: Int?
     var lastPreview: String?
     var usage: SessionUsage?
+    /// "main" | "subagent" — subagents hidden from default session list.
+    var sessionKind: String?
+    var agentName: String?
+    var isSubagent: Bool?
 
     var isRunning: Bool { status == "running" }
+
+    var isSubagentSession: Bool {
+        if let isSubagent { return isSubagent }
+        return (sessionKind ?? "main") == "subagent"
+    }
 
     /// Sort key: prefer updatedAt, else createdAt.
     var activityKey: String { updatedAt ?? createdAt }

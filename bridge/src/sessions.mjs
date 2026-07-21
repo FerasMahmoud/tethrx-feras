@@ -26,7 +26,7 @@ function normalizeUsage(u) {
 }
 
 class Session {
-  constructor({ id, cwd, model, title, transport, effort, createdAt, turnCount, grokSessionId, planMode, autoApprove, usage, folder, activityPushToken }) {
+  constructor({ id, cwd, model, title, transport, effort, createdAt, turnCount, grokSessionId, planMode, autoApprove, usage, folder, activityPushToken, sessionKind, agentName }) {
     this.id = id || randomUUID();        // valid v4 UUID — required by `grok -s`
     this.cwd = cwd;
     this.model = model;
@@ -38,6 +38,9 @@ class Session {
     this.autoApprove = autoApprove || false;    // "always allow" — auto-approve tool permissions
     this.grokSessionId = grokSessionId || null; // grok's ACP sessionId, for session/load resume
     this.activityPushToken = activityPushToken || null; // ActivityKit push token for background Island
+    // "main" | "subagent" — subagents stay out of the phone's default session list.
+    this.sessionKind = sessionKind || "main";
+    this.agentName = agentName || "";
     this.createdAt = createdAt || new Date().toISOString();
     this.updatedAt = createdAt || this.createdAt;
     this.status = "idle";                // "idle" | "running"
@@ -71,6 +74,9 @@ class Session {
       lastEventId: this._nextEventId,
       lastPreview: this.lastPreview || "",
       usage: this.usage,
+      sessionKind: this.sessionKind || "main",
+      agentName: this.agentName || "",
+      isSubagent: (this.sessionKind || "main") === "subagent",
     };
   }
 
@@ -100,6 +106,8 @@ class Session {
       transport: this.transport, title: this.title, folder: this.folder || "", planMode: this.planMode,
       autoApprove: this.autoApprove, grokSessionId: this.grokSessionId,
       activityPushToken: this.activityPushToken || null,
+      sessionKind: this.sessionKind || "main",
+      agentName: this.agentName || "",
       createdAt: this.createdAt, turnCount: this.turnCount, usage: this.usage,
     };
   }

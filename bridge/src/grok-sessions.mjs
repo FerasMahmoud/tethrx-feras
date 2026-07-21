@@ -29,6 +29,10 @@ function readSummary(summaryPath) {
     const info = s.info || {};
     const id = info.id || null;
     if (!id) return null;
+    // Grok marks spawned workers with session_kind: "subagent" + agent_name
+    // (general-purpose, explore, …). Main interactive sessions use grok-build-plan.
+    const sessionKind = s.session_kind || info.session_kind || "main";
+    const agentName = s.agent_name || info.agent_name || "";
     return {
       id,
       cwd: info.cwd || "",
@@ -40,6 +44,9 @@ function readSummary(summaryPath) {
       updatedAt: s.updated_at || "",
       lastActiveAt: s.last_active_at || s.updated_at || s.created_at || "",
       messageCount: s.num_chat_messages ?? s.num_messages ?? 0,
+      sessionKind,
+      agentName,
+      isSubagent: sessionKind === "subagent",
     };
   } catch {
     return null;

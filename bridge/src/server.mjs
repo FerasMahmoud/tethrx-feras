@@ -679,6 +679,20 @@ async function handle(req, res) {
       ? body.resumeGrokSessionId.trim()
       : undefined;
     const sessionCwd = body.cwd || config.defaultCwd;
+    // Tag subagent resumes so the phone can hide them from the main list.
+    let sessionKind = typeof body.sessionKind === "string" && body.sessionKind.trim()
+      ? body.sessionKind.trim()
+      : "main";
+    let agentName = typeof body.agentName === "string" ? body.agentName.trim() : "";
+    if (resumeId && sessionKind === "main") {
+      try {
+        const hit = listGrokSessions({ limit: 500 }).find((g) => g.id === resumeId);
+        if (hit?.isSubagent || hit?.sessionKind === "subagent") {
+          sessionKind = "subagent";
+          agentName = agentName || hit.agentName || "";
+        }
+      } catch { /* best-effort */ }
+    }
     const session = store.create({
       cwd: sessionCwd,
       model: body.model || config.defaultModel,
@@ -688,6 +702,8 @@ async function handle(req, res) {
       autoApprove: body.autoApprove ?? false,
       title: body.title || (resumeId ? "Resumed" : undefined),
       grokSessionId: resumeId,
+      sessionKind,
+      agentName,
     });
     // Track explicit cwd for phone recents picker.
     if (body.cwd) recordCwdRecent(sessionCwd);

@@ -281,7 +281,9 @@ final class AppState: ObservableObject {
                 planMode: false,
                 autoApprove: defaultAutoApprove,
                 resumeGrokSessionId: g.id,
-                title: g.displayName
+                title: g.displayName,
+                sessionKind: g.isSubagentSession ? "subagent" : "main",
+                agentName: g.agentName
             )
             sessions.insert(s, at: 0)
             if let cwd = g.cwd, !cwd.isEmpty { await rememberCwd(cwd) }

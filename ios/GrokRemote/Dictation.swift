@@ -2,8 +2,14 @@ import Foundation
 import Speech
 import AVFoundation
 
-/// On-device speech-to-text for the composer. Streams partial results into
-/// `transcript` while recording; the chat view mirrors that into the draft.
+/// Composer dictation — tuned for coding accuracy (same class of quality as Grok TUI
+/// voice / `/stt`, which is TUI-local and inert over ACP).
+///
+/// Grok Build's real STT (`xai-grok-voice`, Ctrl+Space / F8, slash `/stt`) runs only
+/// inside the terminal UI. Over ACP those builtins produce no events. On the phone we
+/// therefore use Apple Speech with **server-side** recognition (not on-device-only),
+/// dictation task hint, and coding contextual strings — much closer to Grok STT than
+/// the old on-device SFSpeech path.
 @MainActor
 final class Dictation: ObservableObject {
     @Published var isRecording = false
@@ -45,11 +51,29 @@ final class Dictation: ObservableObject {
         guard !isRecording, let recognizer, recognizer.isAvailable else { return }
         do {
             let audio = AVAudioSession.sharedInstance()
-            try audio.setCategory(.record, mode: .measurement, options: .duckOthers)
+            // `.spokenAudio` + measurement mode is what Apple recommends for dictation
+            // quality (closer to Grok TUI STT than `.record` alone).
+            try audio.setCategory(.record, mode: .measurement, options: [.duckOthers, .allowBluetooth])
             try audio.setActive(true, options: .notifyOthersOnDeactivation)
 
             let req = SFSpeechAudioBufferRecognitionRequest()
             req.shouldReportPartialResults = true
+            // Prefer cloud STT when available — on-device is weaker for code/tech terms.
+            // Grok TUI uses its own cloud STT; this is the closest public path on iOS.
+            if recognizer.supportsOnDeviceRecognition {
+                req.requiresOnDeviceRecognition = false
+            }
+            if #available(iOS 16.0, *) {
+                req.addsPunctuation = true
+                req.taskHint = .dictation
+            }
+            // Bias toward coding / Grok vocabulary (same idea as Grok STT contextual LM).
+            req.contextualStrings = [
+                "grok", "TethrX", "bridge", "TestFlight", "APNs", "SwiftUI",
+                "cwd", "git", "commit", "pull request", "npm", "TypeScript",
+                "Cloudflare", "WSL", "systemd", "compact", "session", "subagent",
+                "approve", "reject", "plan mode", "always approve",
+            ]
             request = req
 
             let input = engine.inputNode

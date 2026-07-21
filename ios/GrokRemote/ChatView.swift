@@ -10,7 +10,6 @@ struct ChatView: View {
     @StateObject private var dictation = Dictation()
     @State private var draft = ""
     @State private var showDetails = false
-    @State private var showGit = false
     @State private var atBottom = true
     @State private var composerExpanded = false
     @State private var pendingImages: [ChatViewModel.AttachedImage] = []
@@ -77,14 +76,10 @@ struct ChatView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 HStack(spacing: 10) {
-                    Button { showGit = true } label: {
-                        Image(systemName: "arrow.triangle.branch").font(.system(size: 14, weight: .semibold))
-                    }
-                    .foregroundStyle(Grok.textDim)
-                    .accessibilityLabel("Review changes")
-
+                    // Session info only — git/branch + live-dot removed (noise).
                     Button { showDetails = true } label: {
-                        Image(systemName: "chart.bar.doc.horizontal").font(.system(size: 14, weight: .semibold))
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 15, weight: .semibold))
                     }
                     .foregroundStyle(Grok.textDim)
                     .accessibilityLabel("Session details")
@@ -94,17 +89,12 @@ struct ChatView: View {
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background(Grok.accent).clipShape(Capsule())
                     }
-                    // Just the dot now: the usage readout under the title is the
-                    // information worth the space, and this still shows connection state.
-                    Circle().fill(vm.live ? Grok.accent : Grok.textFaint).frame(width: 7, height: 7)
-                        .accessibilityLabel(vm.live ? "Connected" : "Reconnecting")
                 }
             }
         }
         .onAppear { vm.start() }
         .onDisappear { vm.stop() }
         .sheet(isPresented: $showDetails) { SessionDetailsSheet(vm: vm) }
-        .sheet(isPresented: $showGit) { GitReviewSheet(client: vm.client, session: vm.session) }
         .alert("Microphone access needed", isPresented: $dictation.denied) {
             Button("Open Settings") {
                 if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
@@ -252,8 +242,8 @@ struct ChatView: View {
             pendingImagesRow
 
             HStack(alignment: .bottom, spacing: 10) {
-                HStack(alignment: .top, spacing: 8) {
-                    Text(">").font(Grok.mono(15, .bold)).foregroundStyle(Grok.accent).padding(.top, 2)
+                HStack(alignment: .center, spacing: 10) {
+                    // No leading ">" — cleaner composer, more room for text.
                     TextField("", text: $draft,
                               prompt: Text(vm.busy ? "queue a follow-up…" : "message grok…").foregroundColor(Grok.textFaint),
                               axis: .vertical)
@@ -269,16 +259,15 @@ struct ChatView: View {
                             .font(.system(size: 15, weight: .medium))
                             .foregroundStyle(pendingImages.isEmpty ? Grok.textDim : Grok.accent)
                     }
-                    .padding(.top, 1)
                     .accessibilityLabel("Attach image")
                     if dictation.supported {
                         Button { dictation.toggle(base: draft) } label: {
-                            Image(systemName: dictation.isRecording ? "waveform" : "mic")
+                            Image(systemName: dictation.isRecording ? "waveform" : "mic.fill")
                                 .font(.system(size: 15, weight: .medium))
                                 .foregroundStyle(dictation.isRecording ? Grok.accent : Grok.textDim)
                                 .symbolEffect(.variableColor.iterative, isActive: dictation.isRecording)
                         }
-                        .padding(.top, 1)
+                        .accessibilityLabel(dictation.isRecording ? "Stop dictation" : "Dictate with Grok STT")
                     }
                 }
                 .padding(.horizontal, 14).padding(.vertical, 11)
@@ -389,11 +378,12 @@ struct ChatView: View {
 
     // Send when idle; when a turn is running, queue the draft (＋) or stop (■).
     // ⌘↩ = send / queue (iPad hardware keyboard). Soft Return still inserts newline.
+    // Enter icon = real return-key glyph (not arrow.up).
     @ViewBuilder private var trailingButtons: some View {
         if vm.busy {
             HStack(spacing: 8) {
                 if canSend {
-                    CircleIconButton(system: "arrow.up",
+                    CircleIconButton(system: "return",
                                      shortcut: KeyboardShortcut(.return, modifiers: .command)) {
                         // Must stop dictation here too, or the recogniser's next partial
                         // result refills the composer with the message just queued.
@@ -409,11 +399,12 @@ struct ChatView: View {
                 CircleIconButton(system: "stop.fill", danger: true) { Task { await vm.cancel() } }
             }
         } else {
-            CircleIconButton(system: "arrow.up", filled: canSend, enabled: canSend,
+            CircleIconButton(system: "return", filled: canSend, enabled: canSend,
                              shortcut: KeyboardShortcut(.return, modifiers: .command)) {
                 submit(draft)
             }
             .help("Send (⌘↩)")
+            .accessibilityLabel("Send")
         }
     }
 
@@ -1486,6 +1477,7 @@ struct SessionDetailsSheet: View {
 
     @State private var ciRuns: [CiRun] = []
     @State private var ciLoading = false
+    @State private var showGit = false
 
     private var u: SessionUsage { vm.usage ?? SessionUsage() }
     private var session: SessionInfo { vm.session }
@@ -1498,6 +1490,27 @@ struct SessionDetailsSheet: View {
                     tokens
                     if !ciRuns.isEmpty || ciLoading { ciSection }
                     technical
+                    // Git review lives here (toolbar branch icon removed).
+                    Button {
+                        showGit = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Review changes")
+                                .font(Grok.mono(13, .semibold))
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Grok.textFaint)
+                        }
+                        .foregroundStyle(Grok.text)
+                        .padding(14)
+                        .background(Grok.raised)
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Grok.hairline, lineWidth: 1))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(20)
             }
@@ -1510,6 +1523,9 @@ struct SessionDetailsSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }.foregroundStyle(Grok.text).fontWeight(.semibold)
                 }
+            }
+            .sheet(isPresented: $showGit) {
+                GitReviewSheet(client: vm.client, session: vm.session)
             }
         }
         .preferredColorScheme(.dark)
