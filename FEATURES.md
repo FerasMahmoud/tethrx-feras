@@ -1,54 +1,32 @@
 # TethrX Feras — features
 
-## Shipped
+## Shipped 2026-07-21 (big pack)
 
-### Core
-- Live SSE (thoughts, tools, diffs)
-- Plan mode, effort, auto-approve
-- Tool approve/reject (+ lock-screen category when APNs works)
-- Queue while busy + stop
-- Dictation, snippets, multi-PC
-- Git review / commit / discard / **Open PR**
-- **CI runs** in session details (`gh run list`)
-- Cost / context meter
-- Feras bridge `https://tethrx.firashome.uk`
+| Feature | Where |
+|---------|--------|
+| APNs key XF27A33VNY | config; auth OK on **sandbox** (prod needs Sandbox&Production key) |
+| Dual-host APNs auto | bridge `apns.mjs` |
+| CLI resume + full history import | `import-cli-history.mjs` |
+| ACP image blocks + path fallback | messages API |
+| ActivityKit push path | LiveActivity + activity-token |
+| FS browse + @path search | `GET /api/fs`, `/api/fs/search` |
+| cwd recents / bookmarks | `/api/cwd-recents` + chips + Browse sheet |
+| Share URL scheme | `tethrx://share?text=` |
+| ⌘↩ send, paste image | ChatView |
+| Quiet hours | bridge config + Settings UI |
+| Open PR + CI runs | git `action:pr`, `GET …/ci` |
+| Running-only filter | SessionListView |
+| Hermes APNs hook script | `tethrx-apns-session-end.sh` |
 
-### Notifications
-- APNs only (no ntfy)
-- Device register, probe, test push
-- Dual host auto (production + sandbox)
-- Quiet hours (bridge `quietHours` + app Settings)
-- Live Activity (FG + ActivityKit token path)
-- Hermes finish script → `tethrx-apns-notify`
+## Solid base
+Live SSE, plan, approvals, multi-PC, dictation, snippets, git review, cost meter, Feras bridge URL
 
-### Sessions
-- Grok CLI resume list + **full history import**
-- Running-only filter
-- cwd recents chips + **Browse** sheet (`/api/fs`)
-- `@path` autocomplete (`/api/fs/search`)
+## APNs note
+Key `XF27A33VNY` authenticates on `api.sandbox.push.apple.com`.  
+TestFlight device tokens need **production**. If prod returns `BadEnvironmentKeyInToken`, recreate APNs key with **Sandbox & Production** (or Production) at developer.apple.com → Keys.
 
-### Input
-- Paste on Plan row (Expand removed)
-- Draft persistence
-- PhotosPicker images + **Paste image** from clipboard
-- ACP image blocks + path fallback
-- Cmd-Return send (keyboard shortcut)
-- `tethrx://share?text=` deep link (+ pair URL)
-
-### Ship
+## Ship
 ```bash
 cd ~/tethrx-feras && git add -A && git commit -m "feat: …" && git push
 gh workflow run testflight.yml -R FerasMahmoud/tethrx-feras
 ```
-
-## APNs note (2026-07-21)
-- Key `XF27A33VNY` from Drive: **auth OK on sandbox**
-- TestFlight device token is **production** → needs key that works on `api.push.apple.com`
-- If production returns `BadEnvironmentKeyInToken`, recreate APNs key with **Sandbox & Production** at developer.apple.com → Keys
-- Install: `install-apns-key AuthKey_XXX.p8`
-
-## Still optional later
-- Full Share Extension target (URL scheme covers share-in)
-- Android / PWA
-- Subagent tree
-- Dual-surface CLI leader mode
