@@ -173,6 +173,27 @@ struct BridgeClient {
         try Self.check(resp)
     }
 
+    /// Load a host file (image) as base64 for the chat viewer.
+    func fetchFile(path: String) async throws -> (mime: String, data: Data) {
+        guard var comps = URLComponents(url: try url("/api/fs/file"), resolvingAgainstBaseURL: false) else {
+            throw BridgeError.badURL
+        }
+        comps.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let u = comps.url else { throw BridgeError.badURL }
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 30
+        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        struct FilePayload: Codable {
+            let mime: String?
+            let data: String
+        }
+        let payload = try JSONDecoder().decode(FilePayload.self, from: data)
+        guard let raw = Data(base64Encoded: payload.data) else { throw BridgeError.badStatus(500) }
+        return (payload.mime ?? "application/octet-stream", raw)
+    }
+
     func cancel(sessionId: String) async {
         _ = try? await session.data(
             for: try request("/api/sessions/\(sessionId)/cancel", method: "POST", json: [:]))

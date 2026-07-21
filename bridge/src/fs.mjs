@@ -2,9 +2,12 @@
 // No writes. readdir/stat only; failures become empty results or thrown errors
 // the route layer turns into 4xx.
 
-import { readdirSync, statSync, lstatSync, existsSync } from "node:fs";
-import { join, resolve, dirname, basename } from "node:path";
+import { readdirSync, statSync, lstatSync, existsSync, readFileSync } from "node:fs";
+import { join, resolve, dirname, basename, extname } from "node:path";
 import { homedir } from "node:os";
+
+const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp"]);
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 function expandHome(p) {
   if (p == null || p === "") return p;
@@ -165,4 +168,51 @@ function searchRelative(prefix, base, { limit, showHidden }) {
 
   walk(base, 1);
   return results;
+}
+
+/**
+ * Read a small image (or any file) for the phone chat viewer.
+ * Returns { path, mime, data: base64, size } or throws.
+ */
+export function readFileBase64(absPath, { maxBytes = MAX_FILE_BYTES } = {}) {
+  const path = resolve(expandHome(absPath));
+  if (!existsSync(path)) {
+    const e = new Error("file not found");
+    e.code = "ENOENT";
+    throw e;
+  }
+  let st;
+  try {
+    st = statSync(path);
+  } catch (err) {
+    const e = new Error(err?.message || "cannot stat");
+    e.code = err?.code || "ESTAT";
+    throw e;
+  }
+  if (!st.isFile()) {
+    const e = new Error("not a file");
+    e.code = "ENOTFILE";
+    throw e;
+  }
+  if (st.size > maxBytes) {
+    const e = new Error(`file too large (${st.size} > ${maxBytes})`);
+    e.code = "ETOOBIG";
+    throw e;
+  }
+  const buf = readFileSync(path);
+  const ext = extname(path).toLowerCase();
+  const mime =
+    ext === ".png" ? "image/png"
+    : ext === ".jpg" || ext === ".jpeg" ? "image/jpeg"
+    : ext === ".gif" ? "image/gif"
+    : ext === ".webp" ? "image/webp"
+    : ext === ".heic" ? "image/heic"
+    : "application/octet-stream";
+  return {
+    path,
+    mime,
+    size: buf.length,
+    data: buf.toString("base64"),
+    isImage: IMAGE_EXT.has(ext),
+  };
 }

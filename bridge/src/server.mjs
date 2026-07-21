@@ -38,7 +38,7 @@ import { listGrokSessions } from "./grok-sessions.mjs";
 import { seedSessionFromCli } from "./import-cli-history.mjs";
 import * as awake from "./awake.mjs";
 import * as git from "./git.mjs";
-import { listDir, searchPaths } from "./fs.mjs";
+import { listDir, searchPaths, readFileBase64 } from "./fs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, "..", "public");
@@ -641,6 +641,19 @@ async function handle(req, res) {
       return send(res, 200, { results: searchPaths(q, { cwd, limit, showHidden }) });
     } catch (err) {
       return send(res, 400, { error: err?.message || "search failed", results: [] });
+    }
+  }
+
+  // Read a small file (images for chat viewer) as base64.
+  if (pathname === "/api/fs/file" && req.method === "GET") {
+    const p = url.searchParams.get("path") || "";
+    if (!p) return send(res, 400, { error: "missing path" });
+    try {
+      return send(res, 200, readFileBase64(p));
+    } catch (err) {
+      const code = err?.code;
+      const status = code === "ENOENT" ? 404 : code === "ETOOBIG" ? 413 : code === "EACCES" ? 403 : 400;
+      return send(res, status, { error: err?.message || "cannot read file", code });
     }
   }
 

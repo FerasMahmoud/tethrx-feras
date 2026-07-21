@@ -269,7 +269,7 @@ struct SessionListView: View {
         }
     }
 
-    // Session list, filtered by running chip + search query (title, folder, cwd, id).
+    // Session list, filtered by running chip + search; unread + recent already sorted in AppState.
     private var filteredSessions: [SessionInfo] {
         var list = app.sessions
         if runningOnly { list = list.filter { $0.isRunning } }
@@ -279,6 +279,7 @@ struct SessionListView: View {
             $0.title.lowercased().contains(q)
             || ($0.folder?.lowercased().contains(q) ?? false)
             || ($0.cwd?.lowercased().contains(q) ?? false)
+            || ($0.lastPreview?.lowercased().contains(q) ?? false)
             || $0.id.lowercased().hasPrefix(q)
         }
     }
@@ -376,7 +377,9 @@ struct SessionListView: View {
 
     private func sessionLink(_ session: SessionInfo) -> some View {
         HStack(spacing: 2) {
-            NavigationLink(value: session) { SessionRow(session: session) }
+            NavigationLink(value: session) {
+                SessionRow(session: session, unread: app.isUnread(session))
+            }
                 .buttonStyle(.plain)
             // Visible affordance — the same actions used to be long-press only.
             Menu {
@@ -619,11 +622,28 @@ struct GrokCliRow: View {
 
 struct SessionRow: View {
     let session: SessionInfo
+    var unread: Bool = false
 
     private var name: String { session.displayName }
 
     var body: some View {
         HStack(spacing: 12) {
+            // Unread indicator (vector circle — not emoji)
+            ZStack {
+                if unread {
+                    Circle()
+                        .fill(Grok.accent)
+                        .frame(width: 9, height: 9)
+                        .overlay(
+                            Circle().stroke(Grok.bg, lineWidth: 1.5)
+                        )
+                        .accessibilityLabel("Unread")
+                } else {
+                    Circle().fill(Color.clear).frame(width: 9, height: 9)
+                }
+            }
+            .frame(width: 12)
+
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     Text(session.id.prefix(8))
@@ -634,15 +654,34 @@ struct SessionRow: View {
                             Text("RUNNING").font(Grok.mono(9, .semibold)).tracking(0.8).foregroundStyle(Grok.accent)
                         }
                     }
-                }
-                Text(name).font(Grok.sans(16, .semibold)).foregroundStyle(Grok.text).lineLimit(1)
-                HStack(spacing: 8) {
-                    if let cwd = session.cwd, !cwd.isEmpty {
-                        Text(cwd).font(Grok.mono(11)).foregroundStyle(Grok.textDim)
-                            .lineLimit(1).truncationMode(.head)
+                    if unread {
+                        Text("NEW")
+                            .font(Grok.mono(8, .bold))
+                            .tracking(0.6)
+                            .foregroundStyle(Grok.bg)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(Grok.accent)
+                            .clipShape(Capsule())
                     }
-                    Text("· \(session.turnCount) turn\(session.turnCount == 1 ? "" : "s")")
-                        .font(Grok.mono(11)).foregroundStyle(Grok.textFaint).fixedSize()
+                }
+                Text(name)
+                    .font(Grok.sans(16, unread ? .bold : .semibold))
+                    .foregroundStyle(Grok.text)
+                    .lineLimit(1)
+                if let preview = session.lastPreview, !preview.isEmpty {
+                    Text(preview)
+                        .font(Grok.mono(12))
+                        .foregroundStyle(unread ? Grok.textDim : Grok.textFaint)
+                        .lineLimit(1)
+                } else {
+                    HStack(spacing: 8) {
+                        if let cwd = session.cwd, !cwd.isEmpty {
+                            Text(cwd).font(Grok.mono(11)).foregroundStyle(Grok.textDim)
+                                .lineLimit(1).truncationMode(.head)
+                        }
+                        Text("· \(session.turnCount) turn\(session.turnCount == 1 ? "" : "s")")
+                            .font(Grok.mono(11)).foregroundStyle(Grok.textFaint).fixedSize()
+                    }
                 }
             }
             Spacer(minLength: 0)

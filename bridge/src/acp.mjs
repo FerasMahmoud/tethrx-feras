@@ -275,9 +275,42 @@ export class AcpSession {
     const u = msg.params?.update;
     if (!u) return;
     const text = (c) => c?.text ?? (typeof c === "string" ? c : "");
+    // ACP content may be a single block or array; surface images for the phone chat UI.
+    const emitContent = (kind, content) => {
+      const blocks = Array.isArray(content) ? content : content ? [content] : [];
+      for (const b of blocks) {
+        if (!b || typeof b !== "object") {
+          if (typeof b === "string" && b) this.onEvent({ kind, text: b });
+          continue;
+        }
+        if (b.type === "image" || b.type === "image_url") {
+          const data = b.data || b.source?.data || "";
+          const mime = b.mimeType || b.mime || b.source?.media_type || b.source?.mediaType || "image/png";
+          const uri = b.uri || b.source?.url || "";
+          if (data || uri) this.onEvent({ kind: "image", mimeType: mime, data: data || undefined, uri: uri || undefined });
+          continue;
+        }
+        if (b.type === "text" || b.text) {
+          const t = text(b);
+          if (t) this.onEvent({ kind, text: t });
+          continue;
+        }
+        // Nested content wrapper
+        if (b.type === "content" && b.content) {
+          emitContent(kind, b.content);
+          continue;
+        }
+        const t = text(b);
+        if (t) this.onEvent({ kind, text: t });
+      }
+      if (!blocks.length) {
+        const t = text(content);
+        if (t) this.onEvent({ kind, text: t });
+      }
+    };
     switch (u.sessionUpdate) {
-      case "agent_message_chunk": this.onEvent({ kind: "text", text: text(u.content) }); break;
-      case "agent_thought_chunk": this.onEvent({ kind: "thought", text: text(u.content) }); break;
+      case "agent_message_chunk": emitContent("text", u.content); break;
+      case "agent_thought_chunk": emitContent("thought", u.content); break;
       case "tool_call":
         this.onEvent({
           kind: "tool_call",

@@ -39,9 +39,11 @@ class Session {
     this.grokSessionId = grokSessionId || null; // grok's ACP sessionId, for session/load resume
     this.activityPushToken = activityPushToken || null; // ActivityKit push token for background Island
     this.createdAt = createdAt || new Date().toISOString();
+    this.updatedAt = createdAt || this.createdAt;
     this.status = "idle";                // "idle" | "running"
     this.turnCount = turnCount || 0;
     this.usage = normalizeUsage(usage);  // token/cost usage, accumulated + persisted
+    this.lastPreview = "";               // short text for session list / unread
 
     this.historyPath = null;             // set by the store; where events are persisted
     this.acp = null;                     // AcpSession (lazy, set by the server for ACP sessions)
@@ -65,7 +67,9 @@ class Session {
       status: this.status,
       turnCount: this.turnCount,
       createdAt: this.createdAt,
+      updatedAt: this.updatedAt || this.createdAt,
       lastEventId: this._nextEventId,
+      lastPreview: this.lastPreview || "",
       usage: this.usage,
     };
   }
@@ -124,14 +128,15 @@ class Session {
    */
   seedHistory(events) {
     if (!Array.isArray(events) || !events.length) return 0;
-    // Replace empty history; if we already have bridge events, append after them.
     for (const event of events) {
       if (!event || typeof event !== "object") continue;
       const id = ++this._nextEventId;
       this._events.push({ id, event });
       if (this._events.length > HISTORY_LIMIT) this._events.shift();
+      if (event.kind === "turn_start" && event.text) this.lastPreview = String(event.text).slice(0, 120);
+      else if (event.kind === "text" && event.text) this.lastPreview = String(event.text).slice(0, 120);
     }
-    // Count user turns for the session list badge
+    this.updatedAt = new Date().toISOString();
     const userTurns = events.filter((e) => e?.kind === "turn_start").length;
     if (userTurns > this.turnCount) this.turnCount = userTurns;
     return events.length;
@@ -144,6 +149,15 @@ class Session {
     const record = { id, event };
     this._events.push(record);
     if (this._events.length > HISTORY_LIMIT) this._events.shift();
+    this.updatedAt = new Date().toISOString();
+    // Preview for session list (unread / sort)
+    if (event?.kind === "turn_start" && event.text) {
+      this.lastPreview = String(event.text).slice(0, 120);
+    } else if (event?.kind === "text" && event.text) {
+      this.lastPreview = String(event.text).slice(0, 120);
+    } else if (event?.kind === "image") {
+      this.lastPreview = "[image]";
+    }
 
     const frame = `id: ${id}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const res of this._subscribers) {

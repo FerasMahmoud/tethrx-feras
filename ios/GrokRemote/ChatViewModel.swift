@@ -93,11 +93,20 @@ final class ChatViewModel: ObservableObject {
         var data: Data
     }
 
+    /// Called when the open chat should bump the session read cursor (parent AppState).
+    var onActivity: ((Int) -> Void)?
+
     func send(_ text: String, images: [AttachedImage] = []) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !images.isEmpty else { return }
         busy = true
         errorMessage = nil
+        // Optimistic user bubble with images (server turn_start is text-only).
+        if !images.isEmpty {
+            var item = ChatItem(role: .user, text: trimmed.isEmpty ? "" : trimmed)
+            item.images = images.map { ChatImage(name: $0.name, mime: $0.mime, data: $0.data) }
+            items.append(item)
+        }
         do {
             let payload: [[String: Any]]? = images.isEmpty ? nil : images.map {
                 [
@@ -202,7 +211,18 @@ final class ChatViewModel: ObservableObject {
             thoughtIndex = nil
             busy = true
             liveActivity.start(sessionName: sessionName, phase: "working", detail: "Grok is working…")
-            append(.user, event["text"] as? String ?? "")
+            let t = event["text"] as? String ?? ""
+            // Skip duplicate user bubble if we already optimistically added one with images.
+            let last = items.last
+            if last?.role == .user, !last!.images.isEmpty {
+                // Keep optimistic bubble; optionally merge text.
+                if !t.isEmpty, last?.text.isEmpty == true, let i = items.indices.last {
+                    items[i].text = t
+                }
+            } else if !t.isEmpty {
+                append(.user, t)
+            }
+            if let eid = event["_eventId"] as? Int { onActivity?(eid) }
 
         case "text":
             let t = event["text"] as? String ?? ""
@@ -212,6 +232,40 @@ final class ChatViewModel: ObservableObject {
                 append(.assistant, t)
                 assistantIndex = items.count - 1
             }
+            if let eid = event["_eventId"] as? Int { onActivity?(eid) }
+
+        case "image":
+            // Agent (or tool) image block — attach to current assistant bubble or new one.
+            let mime = event["mimeType"] as? String ?? event["mime"] as? String ?? "image/png"
+            let b64 = event["data"] as? String
+            let uri = event["uri"] as? String
+            var path: String? = nil
+            if let uri, uri.hasPrefix("file://") {
+                path = String(uri.dropFirst("file://".count))
+            } else if let uri, uri.hasPrefix("/") {
+                path = uri
+            }
+            var data: Data? = nil
+            if let b64 { data = Data(base64Encoded: b64) }
+            let img = ChatImage(
+                name: path.map { ($0 as NSString).lastPathComponent } ?? "image",
+                mime: mime,
+                data: data,
+                path: path
+            )
+            if let i = assistantIndex, items.indices.contains(i) {
+                items[i].images.append(img)
+            } else {
+                var item = ChatItem(role: .assistant, text: "")
+                item.images = [img]
+                items.append(item)
+                assistantIndex = items.count - 1
+            }
+            // Lazy-load path-only images
+            if img.data == nil, let path = img.path {
+                Task { await self.loadImage(path: path, into: img.id) }
+            }
+            if let eid = event["_eventId"] as? Int { onActivity?(eid) }
 
         case "thought":
             let t = event["text"] as? String ?? ""
@@ -317,6 +371,9 @@ final class ChatViewModel: ObservableObject {
             assistantIndex = nil
             thoughtIndex = nil
             liveActivity.end(phase: "done", detail: "Finished")
+            if let eid = event["_eventId"] as? Int { onActivity?(eid) }
+            // Scan assistant text for markdown images ![alt](/path)
+            hydrateMarkdownImages()
             drainQueue()
 
         case "error":
@@ -331,6 +388,41 @@ final class ChatViewModel: ObservableObject {
 
     private func append(_ role: ChatRole, _ text: String) {
         items.append(ChatItem(role: role, text: text))
+    }
+
+    private func loadImage(path: String, into imageId: UUID) async {
+        do {
+            let (mime, data) = try await client.fetchFile(path: path)
+            if let idx = items.firstIndex(where: { $0.images.contains(where: { $0.id == imageId }) }),
+               let j = items[idx].images.firstIndex(where: { $0.id == imageId }) {
+                items[idx].images[j].data = data
+                items[idx].images[j].mime = mime
+            }
+        } catch {
+            // leave placeholder
+        }
+    }
+
+    /// Pull `![alt](/abs/path)` and bare image paths from assistant text into image chips.
+    private func hydrateMarkdownImages() {
+        let pattern = #"!\[[^\]]*\]\(([^)]+)\)"#
+        guard let re = try? NSRegularExpression(pattern: pattern) else { return }
+        for i in items.indices where items[i].role == .assistant {
+            let text = items[i].text
+            let range = NSRange(text.startIndex..., in: text)
+            re.enumerateMatches(in: text, range: range) { match, _, _ in
+                guard let match, let r = Range(match.range(at: 1), in: text) else { return }
+                var path = String(text[r]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if path.hasPrefix("file://") { path = String(path.dropFirst(7)) }
+                guard path.hasPrefix("/"),
+                      ["png","jpg","jpeg","gif","webp","heic"].contains((path as NSString).pathExtension.lowercased())
+                else { return }
+                if items[i].images.contains(where: { $0.path == path }) { return }
+                let img = ChatImage(name: (path as NSString).lastPathComponent, mime: "image/jpeg", path: path)
+                items[i].images.append(img)
+                Task { await self.loadImage(path: path, into: img.id) }
+            }
+        }
     }
 
     /// Compact JSON preview of a tool's arguments for display.

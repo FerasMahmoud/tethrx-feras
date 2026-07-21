@@ -192,7 +192,7 @@ final class AppState: ObservableObject {
         do {
             let h = try await client.health()
             health = h
-            sessions = try await client.listSessions()
+            sessions = Self.sortSessions(try await client.listSessions())
             connected = true
             rememberCurrentBridge()                                        // keep the paired-computer list current
             lastUsage = try? await client.usage()
@@ -220,11 +220,49 @@ final class AppState: ObservableObject {
     func reloadSessions() async {
         guard let client else { return }
         do {
-            sessions = try await client.listSessions()
+            sessions = Self.sortSessions(try await client.listSessions())
             publishWidgetSnapshot()
         }
         catch { errorMessage = friendly(error) }
         await reloadGrokCliSessions()
+    }
+
+    // MARK: Unread (per-session last-seen event id)
+
+    private func readKey(_ id: String) -> String { "session.readEvent.\(id)" }
+
+    /// True when bridge has events the user has not opened yet.
+    func isUnread(_ session: SessionInfo) -> Bool {
+        let seen = UserDefaults.standard.integer(forKey: readKey(session.id))
+        let last = session.lastEventId ?? 0
+        // New empty session (0 events) is not unread.
+        return last > 0 && last > seen
+    }
+
+    func markRead(_ session: SessionInfo, eventId: Int? = nil) {
+        let id = eventId ?? session.lastEventId ?? 0
+        let key = readKey(session.id)
+        let prev = UserDefaults.standard.integer(forKey: key)
+        if id > prev { UserDefaults.standard.set(id, forKey: key) }
+        // Re-sort so unread badge drops without full reload.
+        sessions = Self.sortSessions(sessions)
+    }
+
+    /// Unread first, then most recently active.
+    static func sortSessions(_ list: [SessionInfo]) -> [SessionInfo] {
+        let d = UserDefaults.standard
+        func seen(_ s: SessionInfo) -> Int { d.integer(forKey: "session.readEvent.\(s.id)") }
+        func unread(_ s: SessionInfo) -> Bool {
+            let last = s.lastEventId ?? 0
+            return last > 0 && last > seen(s)
+        }
+        return list.sorted { a, b in
+            let ua = unread(a), ub = unread(b)
+            if ua != ub { return ua && !ub }
+            let ta = a.activityKey, tb = b.activityKey
+            if ta != tb { return ta > tb }
+            return (a.lastEventId ?? 0) > (b.lastEventId ?? 0)
+        }
     }
 
     /// Best-effort load of host Grok CLI sessions for resume. Never fails connect.

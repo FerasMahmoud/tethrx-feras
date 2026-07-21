@@ -48,6 +48,10 @@ struct ChatView: View {
                 draft = saved
             }
             consumePendingShare()
+            app.markRead(vm.session)
+            vm.onActivity = { eid in
+                app.markRead(vm.session, eventId: eid)
+            }
         }
         .onChange(of: draft) { _, v in
             UserDefaults.standard.set(v, forKey: draftKey)
@@ -621,9 +625,25 @@ struct ChatView: View {
     }
 
     /// Attach clipboard image as JPEG (same path as PhotosPicker).
+    /// Tries UIImage first, then raw image data types (PNG/JPEG from some apps).
     private func pasteClipboardImage() {
-        guard let ui = UIPasteboard.general.image,
-              let jpeg = ui.jpegData(compressionQuality: 0.82) else {
+        let board = UIPasteboard.general
+        var jpeg: Data?
+        if let ui = board.image {
+            jpeg = ui.jpegData(compressionQuality: 0.82)
+        }
+        if jpeg == nil {
+            for type in ["public.png", "public.jpeg", "public.heic"] {
+                if let data = board.data(forPasteboardType: type), !data.isEmpty {
+                    if type == "public.jpeg" { jpeg = data; break }
+                    if let ui = UIImage(data: data) {
+                        jpeg = ui.jpegData(compressionQuality: 0.82)
+                        break
+                    }
+                }
+            }
+        }
+        guard let jpeg, !jpeg.isEmpty else {
             Haptics.tap()
             return
         }
@@ -772,46 +792,82 @@ struct TypingIndicator: View {
 /// Renders one conversation line in the console style.
 struct ChatBubble: View {
     let item: ChatItem
+    @State private var viewerImage: IdentifiedImage?
 
-    /// Grok emits Markdown (**bold**, `code`, links). Render inline markdown while
-    /// keeping line breaks; fall back to plain text on partial/streaming input.
+    /// Full markdown (headings, lists, links). Tables handled separately.
     static func markdown(_ s: String) -> AttributedString {
         let text = s.isEmpty ? " " : s
-        let opts = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        var opts = AttributedString.MarkdownParsingOptions()
+        opts.interpretedSyntax = .full
         return (try? AttributedString(markdown: text, options: opts)) ?? AttributedString(text)
     }
 
-    /// One run of a message: either prose (inline markdown) or a fenced code block.
+    /// One run of a message: prose, fenced code, or pipe table.
     struct Segment {
-        let isCode: Bool
+        enum Kind { case prose, code, table }
+        let kind: Kind
         let language: String
         let text: String
+        var isCode: Bool { kind == .code }
     }
 
-    /// Split a (possibly still-streaming) message on ``` fences so code renders as a
-    /// real block instead of collapsing into inline text.
+    /// Split on ``` fences and GFM tables so structure survives streaming.
     static func segments(_ s: String) -> [Segment] {
         var out: [Segment] = []
         var inCode = false
         var language = ""
         var buf: [String] = []
 
-        func flush() {
+        func flushProseOrTable() {
             let text = buf.joined(separator: "\n")
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                out.append(Segment(isCode: inCode, language: language, text: text))
-            }
             buf = []
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            // Detect markdown table blocks
+            let lines = text.components(separatedBy: "\n")
+            var i = 0
+            var proseBuf: [String] = []
+            func flushProse() {
+                let t = proseBuf.joined(separator: "\n")
+                proseBuf = []
+                if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out.append(Segment(kind: .prose, language: "", text: t))
+                }
+            }
+            while i < lines.count {
+                if isTableHeader(lines, at: i) {
+                    flushProse()
+                    var tableLines: [String] = [lines[i], lines[i + 1]]
+                    i += 2
+                    while i < lines.count, lines[i].contains("|") {
+                        tableLines.append(lines[i])
+                        i += 1
+                    }
+                    out.append(Segment(kind: .table, language: "", text: tableLines.joined(separator: "\n")))
+                } else {
+                    proseBuf.append(lines[i])
+                    i += 1
+                }
+            }
+            flushProse()
+        }
+
+        func flushCode() {
+            let text = buf.joined(separator: "\n")
+            buf = []
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                out.append(Segment(kind: .code, language: language, text: text))
+            }
         }
 
         for line in s.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("```") {
-                flush()
                 if inCode {
+                    flushCode()
                     inCode = false
                     language = ""
                 } else {
+                    flushProseOrTable()
                     inCode = true
                     language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 }
@@ -819,8 +875,18 @@ struct ChatBubble: View {
                 buf.append(line)
             }
         }
-        flush()
-        return out.isEmpty ? [Segment(isCode: false, language: "", text: s)] : out
+        if inCode { flushCode() } else { flushProseOrTable() }
+        return out.isEmpty ? [Segment(kind: .prose, language: "", text: s)] : out
+    }
+
+    private static func isTableHeader(_ lines: [String], at i: Int) -> Bool {
+        guard i + 1 < lines.count else { return false }
+        let h = lines[i].trimmingCharacters(in: .whitespaces)
+        let s = lines[i + 1].trimmingCharacters(in: .whitespaces)
+        guard h.contains("|"), s.contains("|"), s.contains("-") else { return false }
+        // separator like |---|---|
+        let sep = s.replacingOccurrences(of: "|", with: "").replacingOccurrences(of: " ", with: "")
+        return sep.allSatisfy { $0 == "-" || $0 == ":" }
     }
 
     var body: some View {
@@ -828,33 +894,51 @@ struct ChatBubble: View {
         case .user:
             HStack {
                 Spacer(minLength: 44)
-                Text(item.text)
-                    .font(Grok.sans(15))
-                    .foregroundStyle(Grok.text)
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(Grok.raised)
-                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Grok.hairlineStrong, lineWidth: 1))
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                VStack(alignment: .trailing, spacing: 8) {
+                    if !item.images.isEmpty {
+                        ChatImageStrip(images: item.images) { viewerImage = $0 }
+                    }
+                    if !item.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text(item.text)
+                            .font(Grok.sans(15))
+                            .foregroundStyle(Grok.text)
+                            .padding(.horizontal, 14).padding(.vertical, 10)
+                            .background(Grok.raised)
+                            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Grok.hairlineStrong, lineWidth: 1))
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
+                }
+            }
+            .fullScreenCover(item: $viewerImage) { img in
+                ImageViewer(image: img)
             }
 
         case .assistant:
             VStack(alignment: .leading, spacing: 10) {
                 Eyebrow("GROK")
-                // Index-keyed so streaming appends don't rebuild every segment.
+                if !item.images.isEmpty {
+                    ChatImageStrip(images: item.images) { viewerImage = $0 }
+                }
                 ForEach(Array(Self.segments(item.text).enumerated()), id: \.offset) { _, seg in
-                    if seg.isCode {
+                    switch seg.kind {
+                    case .code:
                         CodeBlock(code: seg.text, language: seg.language)
-                    } else {
+                    case .table:
+                        MarkdownTable(text: seg.text)
+                    case .prose:
                         Text(Self.markdown(seg.text))
                             .font(Grok.sans(15))
                             .foregroundStyle(Grok.text)
-                            .lineSpacing(3)
+                            .lineSpacing(4)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .fullScreenCover(item: $viewerImage) { img in
+                ImageViewer(image: img)
+            }
 
         case .thought:
             HStack(alignment: .top, spacing: 10) {
@@ -1311,5 +1395,152 @@ struct PlanCard: View {
         .background(Grok.raised)
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Grok.hairlineStrong, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+// MARK: - Images (WhatsApp-style strip + full-screen viewer)
+
+struct IdentifiedImage: Identifiable {
+    let id: UUID
+    let uiImage: UIImage
+    let name: String
+}
+
+/// Horizontal strip of chat images; tap opens full-screen viewer.
+struct ChatImageStrip: View {
+    let images: [ChatImage]
+    var onTap: (IdentifiedImage) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(images) { img in
+                    ChatImageThumb(image: img) { ui in
+                        onTap(IdentifiedImage(id: img.id, uiImage: ui, name: img.name))
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ChatImageThumb: View {
+    let image: ChatImage
+    var onReady: (UIImage) -> Void
+    @State private var ui: UIImage?
+
+    var body: some View {
+        Group {
+            if let ui {
+                Image(uiImage: ui)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 120, height: 120)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Grok.hairlineStrong, lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 12))
+                    .onTapGesture { onReady(ui) }
+            } else {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Grok.raised)
+                    .frame(width: 120, height: 120)
+                    .overlay(
+                        ProgressView().tint(Grok.textDim)
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Grok.hairline, lineWidth: 1))
+            }
+        }
+        .onAppear { load() }
+        .onChange(of: image.data) { _, _ in load() }
+    }
+
+    private func load() {
+        if let data = image.data, let u = UIImage(data: data) {
+            ui = u
+            return
+        }
+        // path-only: parent ChatViewModel hydrates data; show placeholder until then
+    }
+}
+
+struct ImageViewer: View {
+    let image: IdentifiedImage
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 0) {
+                HStack {
+                    Text(image.name)
+                        .font(Grok.mono(12))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                    Spacer()
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 36, height: 36)
+                            .background(Color.white.opacity(0.15), in: Circle())
+                    }
+                }
+                .padding(16)
+                Spacer()
+                Image(uiImage: image.uiImage)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(.horizontal, 8)
+                Spacer()
+            }
+        }
+    }
+}
+
+// MARK: - Markdown tables (GFM pipe tables)
+
+struct MarkdownTable: View {
+    let text: String
+
+    private var rows: [[String]] {
+        text.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.allSatisfy({ $0 == "|" || $0 == "-" || $0 == ":" || $0 == " " }) }
+            .map { line in
+                var s = line
+                if s.hasPrefix("|") { s = String(s.dropFirst()) }
+                if s.hasSuffix("|") { s = String(s.dropLast()) }
+                return s.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+            }
+    }
+
+    var body: some View {
+        let data = rows
+        if data.isEmpty {
+            EmptyView()
+        } else {
+            ScrollView(.horizontal, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(data.enumerated()), id: \.offset) { ri, row in
+                        HStack(alignment: .top, spacing: 0) {
+                            ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                                Text(cell)
+                                    .font(ri == 0 ? Grok.mono(11, .semibold) : Grok.mono(11))
+                                    .foregroundStyle(ri == 0 ? Grok.text : Grok.textDim)
+                                    .frame(minWidth: 72, alignment: .leading)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 6)
+                            }
+                        }
+                        if ri < data.count - 1 {
+                            Rectangle().fill(Grok.hairline).frame(height: 1)
+                        }
+                    }
+                }
+                .background(Grok.raised)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Grok.hairline, lineWidth: 1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
     }
 }

@@ -54,10 +54,15 @@ struct SessionInfo: Codable, Identifiable, Hashable {
     var status: String
     var turnCount: Int
     var createdAt: String
+    var updatedAt: String?
     var lastEventId: Int?
+    var lastPreview: String?
     var usage: SessionUsage?
 
     var isRunning: Bool { status == "running" }
+
+    /// Sort key: prefer updatedAt, else createdAt.
+    var activityKey: String { updatedAt ?? createdAt }
 
     /// What the UI shows. Renaming writes `title`, so it has to win here — the views
     /// used to render the working directory's folder name unconditionally, which made
@@ -284,12 +289,32 @@ struct FileDiff: Equatable {
     var newLines: [String] { newText.isEmpty ? [] : newText.components(separatedBy: "\n") }
 }
 
+/// Image attached to a chat bubble (user paste/send or agent output).
+struct ChatImage: Identifiable, Equatable, Hashable {
+    let id: UUID
+    var name: String
+    var mime: String
+    var data: Data?
+    var path: String?   // absolute path on the host (load via bridge)
+
+    init(id: UUID = UUID(), name: String, mime: String, data: Data? = nil, path: String? = nil) {
+        self.id = id
+        self.name = name
+        self.mime = mime
+        self.data = data
+        self.path = path
+    }
+}
+
 /// One rendered line in the conversation. Streaming text is appended into the
 /// `text` of the current assistant/thought item, so bubbles grow token-by-token.
 struct ChatItem: Identifiable, Equatable {
     let id = UUID()
     var role: ChatRole
     var text: String
+
+    // Images (user attach / agent image blocks / markdown paths)
+    var images: [ChatImage] = []
 
     // Tool activity (ACP transport)
     var toolCallId: String? = nil
