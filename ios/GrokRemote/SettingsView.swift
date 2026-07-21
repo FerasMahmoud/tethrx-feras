@@ -176,8 +176,30 @@ struct SettingsView: View {
             toggleRow("Push notifications",
                       "APNs alerts when Grok finishes a turn or needs approval — even with the app closed",
                       Binding(get: { push.enabled }, set: { $0 ? push.enable() : push.disable() }))
-            Text("Uses Apple Push (APNs) only. Requires an APNs key on the bridge and Push entitlement on this app. Delivered when the phone is not actively watching the session.")
+            Text("Uses Apple Push (APNs) only. Requires an APNs Auth Key (not ASC API key) on the bridge, topic uk.firashome.tethrx. Delivered when the phone is not actively watching the session.")
                 .font(Grok.mono(10)).foregroundStyle(Grok.textFaint)
+            if push.enabled, app.connected {
+                Button {
+                    Task {
+                        guard let client = app.client else { return }
+                        do {
+                            let r = try await client.pushProbe(sendTest: true)
+                            let probe = r["probe"] as? [String: Any]
+                            let authBad = (probe?["authBad"] as? Bool) == true
+                            if authBad {
+                                app.errorMessage = "APNs AuthKey rejected (InvalidProviderToken). Create a Push key in Apple Developer → Keys → APNs, not the ASC API key."
+                            } else {
+                                app.errorMessage = "Test push sent (or probe OK). Check lock screen."
+                            }
+                        } catch {
+                            app.errorMessage = "Push probe failed — is the bridge reachable?"
+                        }
+                    }
+                } label: {
+                    Label("Send test push", systemImage: "bell.badge")
+                }
+                .buttonStyle(PillButton(kind: .subtle))
+            }
         }
     }
 

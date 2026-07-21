@@ -1,0 +1,169 @@
+# One-shot: create Apple Push Services cert via ASC API and upload PEM for the bridge.
+# Auth Keys (p8 with APNs) cannot be created via API — cert path is the automatable fix.
+name: APNs setup (push cert)
+on:
+  workflow_dispatch:
+
+jobs:
+  apns-cert:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Apple Push Services certificate
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          TEAM_ID: 3V4NW789C6
+          BUNDLE_ID: uk.firashome.tethrx
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, json, os, subprocess, time, pathlib
+          from pathlib import Path
+
+          key_id = os.environ["ASC_KEY_ID"]
+          issuer = os.environ["ASC_ISSUER_ID"]
+          key_pem = os.environ["ASC_KEY"]
+          if "BEGIN PRIVATE KEY" not in key_pem:
+              # sometimes stored base64
+              try:
+                  key_pem = base64.b64decode(key_pem).decode()
+              except Exception:
+                  pass
+          if not key_pem.strip().startswith("-----"):
+              key_pem = "-----BEGIN PRIVATE KEY-----\n" + key_pem.strip() + "\n-----END PRIVATE KEY-----\n"
+
+          Path("AuthKey.p8").write_text(key_pem)
+          # CSR + private key for the push cert
+          subprocess.check_call([
+              "openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+              "-keyout", "push.key", "-out", "push.csr",
+              "-subj", f"/CN=TethrX Push/OU={os.environ['TEAM_ID']}/O=Feras/C=SA",
+          ])
+          csr = Path("push.csr").read_text()
+
+          # JWT for ASC
+          import jwt  # PyJWT may be missing — use openssl+python crypto
+          PY
+          pip install -q PyJWT cryptography
+          python3 - <<'PY'
+          import base64, json, os, time, pathlib, subprocess, urllib.request, ssl
+          from pathlib import Path
+          import jwt
+
+          key_id = os.environ["ASC_KEY_ID"]
+          issuer = os.environ["ASC_ISSUER_ID"]
+          key_pem = Path("AuthKey.p8").read_text()
+          token = jwt.encode(
+              {"iss": issuer, "iat": int(time.time()), "exp": int(time.time()) + 1200, "aud": "appstoreconnect-v1"},
+              key_pem,
+              algorithm="ES256",
+              headers={"kid": key_id, "typ": "JWT"},
+          )
+          if isinstance(token, bytes):
+              token = token.decode()
+
+          csr = Path("push.csr").read_text()
+
+          def api(method, path, body=None):
+              data = None if body is None else json.dumps(body).encode()
+              req = urllib.request.Request(
+                  "https://api.appstoreconnect.apple.com" + path,
+                  data=data,
+                  method=method,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return r.status, json.loads(r.read().decode() or "{}")
+              except urllib.error.HTTPError as e:
+                  err = e.read().decode()
+                  print("HTTP", e.code, err[:2000])
+                  return e.code, json.loads(err) if err.startswith("{") else {"raw": err}
+
+          # List existing certs
+          st, listing = api("GET", "/v1/certificates?filter[certificateType]=APPLE_PUSH_SERVICES&limit=50")
+          print("list APPLE_PUSH_SERVICES", st, "count", len((listing or {}).get("data") or []))
+
+          # Try create — types that may work for push
+          created = None
+          for ctype in ("APPLE_PUSH_SERVICES", "DEVELOPMENT", "IOS_DEVELOPMENT"):
+              st, res = api("POST", "/v1/certificates", {
+                  "data": {
+                      "type": "certificates",
+                      "attributes": {
+                          "certificateType": ctype,
+                          "csrContent": csr,
+                      },
+                  }
+              })
+              print("create", ctype, st)
+              if st in (200, 201) and res.get("data"):
+                  created = res["data"]
+                  print("created type", ctype, "id", created.get("id"))
+                  break
+
+          if not created:
+              # Fall back: list all cert types we can see
+              st, allc = api("GET", "/v1/certificates?limit=200")
+              types = {}
+              for c in (allc or {}).get("data") or []:
+                  t = (c.get("attributes") or {}).get("certificateType")
+                  types[t] = types.get(t, 0) + 1
+              print("available cert types on account:", types)
+              # Also try bundleIds for push capability
+              st, bids = api("GET", f"/v1/bundleIds?filter[identifier]={os.environ['BUNDLE_ID']}")
+              print("bundleId lookup", st, json.dumps(bids)[:800])
+              raise SystemExit("Could not create push certificate via ASC API. Need manual APNs Auth Key from developer.apple.com/account/resources/authkeys")
+
+          cert_b64 = created["attributes"]["certificateContent"]
+          Path("push.cer.b64").write_text(cert_b64)
+          Path("push.cer").write_bytes(base64.b64decode(cert_b64))
+          # Convert DER/PEM
+          subprocess.check_call(["openssl", "x509", "-inform", "DER", "-in", "push.cer", "-out", "push.crt"])
+          # Combined PEM for node mTLS
+          pem = Path("push.crt").read_text() + "\n" + Path("push.key").read_text()
+          Path("apns-client.pem").write_text(pem)
+          Path("apns-meta.json").write_text(json.dumps({
+              "certificateId": created["id"],
+              "certificateType": created["attributes"].get("certificateType"),
+              "displayName": created["attributes"].get("displayName"),
+              "expirationDate": created["attributes"].get("expirationDate"),
+              "teamId": os.environ["TEAM_ID"],
+              "bundleId": os.environ["BUNDLE_ID"],
+              "authMode": "certificate",
+          }, indent=2))
+          print("OK wrote apns-client.pem")
+          PY
+
+      - name: Upload APNs client PEM
+        uses: actions/upload-artifact@v4
+        with:
+          name: apns-client-pem
+          path: |
+            apns-client.pem
+            apns-meta.json
+            push.crt
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Write setup instructions
+        if: failure()
+        run: |
+          cat > APNS-MANUAL.md <<'EOF'
+          ASC API cannot create APNs Auth Keys (.p8 with Push).
+          Do this once (60s):
+          1. https://developer.apple.com/account/resources/authkeys/list
+          2. + → enable Apple Push Notifications service (APNs)
+          3. Download AuthKey_XXXX.p8
+          4. Put on PC: ~/secrets/apple/AuthKey_APNS_XXXX.p8
+          5. Update ~/.grok-remote/config.json apns.keyPath + keyId
+          6. systemctl --user restart tethrx-bridge
+          7. curl probe: POST /api/push/probe
+          EOF
+          cat APNS-MANUAL.md

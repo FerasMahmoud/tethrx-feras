@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Send a native APNs alert via the local TethrX bridge (no ntfy).
+# Usage: tethrx-apns-notify "title" "body" [sessionId]
+set -euo pipefail
+TITLE="${1:-TethrX}"
+BODY="${2:-Done}"
+SID="${3:-}"
+TOKEN_FILE="${HOME}/.tethrx-pair-token"
+BASE="${TETHRX_BRIDGE_URL:-http://127.0.0.1:4180}"
+if [[ ! -f "$TOKEN_FILE" ]]; then
+  echo "missing $TOKEN_FILE" >&2
+  exit 1
+fi
+AUTH=$(cat "$TOKEN_FILE")
+curl -sS -X POST \
+  -H "Authorization: Bearer ${AUTH}" \
+  -H "Content-Type: application/json" \
+  -d "$(python3 -c "import json,sys; print(json.dumps({'sendTest':True,'title':sys.argv[1],'message':sys.argv[2],'sessionId':sys.argv[3]}))" "$TITLE" "$BODY" "$SID")" \
+  "${BASE}/api/push/probe"
+echo

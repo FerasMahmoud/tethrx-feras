@@ -31,6 +31,7 @@ import { runHeadlessTurn, grokVersion } from "./grok.mjs";
 import { ensureAskGrokHome, AcpSession } from "./acp.mjs";
 import { loadApns } from "./apns.mjs";
 import { listGrokSessions } from "./grok-sessions.mjs";
+import { seedSessionFromCli } from "./import-cli-history.mjs";
 import * as awake from "./awake.mjs";
 import * as git from "./git.mjs";
 
@@ -248,6 +249,11 @@ function notifyPermission(session, event) {
     if (allow) mintApprovalToken(session.id, event.requestId, allow.optionId);
     if (reject) mintApprovalToken(session.id, event.requestId, reject.optionId);
   }
+  apns.sendLiveActivity(session, {
+    phase: "waiting",
+    detail: "Waiting for your approval",
+    event: "update",
+  }).catch(() => {});
   pushNotify(session, {
     title: `${displayTitle(session)} — approval needed`,
     message: event.command || event.title || "Grok wants to run a tool",
@@ -371,17 +377,31 @@ function startAcpTurn(session, body) {
   session.beginTurn();
   session.emit({ kind: "turn_start", text: body.text, at: new Date().toISOString() });
   awake.acquire();   // don't let the machine sleep out from under a running turn
+  apns.sendLiveActivity(session, { phase: "working", detail: "Grok is working…", event: "update" }).catch(() => {});
 
   (async () => {
     try {
       const acp = await ensureAcp(session);
-      const result = await acp.prompt(body.text);
+      // Prefer true ACP content blocks (text + image); fall back to plain text.
+      let result;
+      try {
+        result = await acp.prompt(body.promptBlocks || body.text);
+      } catch (err) {
+        if (body.promptBlocks && body.text) {
+          console.error("[bridge] ACP image prompt failed, text fallback:", err?.message || err);
+          result = await acp.prompt(body.text);
+        } else {
+          throw err;
+        }
+      }
       session.addUsage(result);                                    // fold grok's token report in
       session.emit({ kind: "usage", usage: session.usage });       // live meter update
       session.emit({ kind: "turn_complete", stopReason: result.stopReason });
       pushNotify(session, { title: displayTitle(session), message: "Grok finished the turn." });
+      apns.sendLiveActivity(session, { phase: "done", detail: "Finished", event: "end" }).catch(() => {});
     } catch (err) {
       session.emit({ kind: "error", message: friendlyTurnError(err) });
+      apns.sendLiveActivity(session, { phase: "error", detail: "Something went wrong", event: "end" }).catch(() => {});
       try { session.acp?.stop(); } catch { /* ignore */ }   // don't orphan the child
       session.acp = null; // force a fresh process on the next turn
     } finally {
@@ -496,6 +516,27 @@ async function handle(req, res) {
     return send(res, ok ? 200 : 400, { ok, push: apns.enabled });
   }
 
+  // Dry-run: probe APNs AuthKey + optional test alert to registered devices.
+  if (pathname === "/api/push/probe" && req.method === "POST") {
+    const body = await readJson(req).catch(() => ({}));
+    const probe = await apns.probe();
+    let sent = null;
+    if (body.sendTest && apns.tokens.length) {
+      sent = await apns.send({
+        title: body.title || "TethrX",
+        body: body.message || "APNs test from bridge",
+        sessionId: body.sessionId || "",
+      });
+    }
+    return send(res, 200, {
+      push: apns.enabled,
+      devices: apns.tokens.length,
+      topic: apns.topic,
+      probe,
+      sent,
+    });
+  }
+
   // Grok CLI sessions on this machine (for resume in the phone app).
   if (pathname === "/api/grok-sessions" && req.method === "GET") {
     const limit = Number(url.searchParams.get("limit") || 50);
@@ -522,7 +563,21 @@ async function handle(req, res) {
       title: body.title || (resumeId ? "Resumed" : undefined),
       grokSessionId: resumeId,
     });
-    return send(res, 201, session.toJSON());
+    // Resume from Grok CLI: import chat_history.jsonl so the phone is NOT empty.
+    // ACP session/load still restores model context on first turn; this is the UI transcript.
+    let imported = null;
+    if (resumeId) {
+      try {
+        imported = seedSessionFromCli(session, resumeId, { maxEvents: 900 });
+        store.save();
+      } catch (err) {
+        console.error("[bridge] CLI history import failed:", err?.message || err);
+        imported = { ok: false, reason: String(err?.message || err), count: 0 };
+      }
+    }
+    const json = session.toJSON();
+    if (imported) json.importedHistory = imported;
+    return send(res, 201, json);
   }
 
   // Answer a pending ACP permission request: /api/sessions/:id/permissions/:requestId
@@ -585,9 +640,12 @@ async function handle(req, res) {
         return send(res, 409, { error: "a turn is already running in this session" });
       }
 
-      // Multimodal path-on-disk fallback: ACP is text-only for now, so write images
-      // under session.cwd/.tethrx-uploads/ and append absolute paths into the prompt.
+      // Multimodal: prefer true ACP image content blocks; also write path-on-disk
+      // under session.cwd/.tethrx-uploads/ as a fallback the model can still open.
       let promptText = hasText ? body.text : "";
+      const promptBlocks = [];
+      if (hasText) promptBlocks.push({ type: "text", text: body.text });
+
       if (images.length) {
         const uploadDir = join(session.cwd, ".tethrx-uploads");
         try {
@@ -610,7 +668,8 @@ async function handle(req, res) {
           if (buf.length > 8 * 1024 * 1024) {
             return send(res, 400, { error: `images[${i}]: exceeds 8MB limit` });
           }
-          const safeName = basename(String(img.name || `image-${i}.bin`)).replace(/[^\w.\-]+/g, "_") || `image-${i}.bin`;
+          const mime = String(img.mime || img.mimeType || "image/jpeg");
+          const safeName = basename(String(img.name || `image-${i}.jpg`)).replace(/[^\w.\-]+/g, "_") || `image-${i}.jpg`;
           const dest = join(uploadDir, `${stamp}-${safeName}`);
           try {
             await writeFile(dest, buf);
@@ -618,12 +677,42 @@ async function handle(req, res) {
           } catch (err) {
             return send(res, 500, { error: `images[${i}]: write failed: ${err.message || err}` });
           }
+          // ACP Image Content block (agentclientprotocol.com/protocol/v1/content)
+          promptBlocks.push({
+            type: "image",
+            mimeType: mime,
+            data: img.data,
+            uri: `file://${dest}`,
+          });
           promptText += `\n[Image attached: ${dest}]`;
+        }
+        // Ensure text block mentions paths if user sent images-only
+        if (!hasText) {
+          promptBlocks.unshift({
+            type: "text",
+            text: "Please review the attached image(s)." + promptText,
+          });
         }
       }
 
-      startTurn(session, { ...body, text: promptText });
+      startTurn(session, {
+        ...body,
+        text: promptText || body.text || "(image)",
+        promptBlocks: promptBlocks.length ? promptBlocks : undefined,
+      });
       return send(res, 202, { ok: true, sessionId: session.id, turn: session.turnCount });
+    }
+
+    // Register ActivityKit push token for background Live Activity updates
+    if (sub === "activity-token" && req.method === "POST") {
+      const body = await readJson(req).catch(() => ({}));
+      const token = typeof body.token === "string" ? body.token.trim().toLowerCase() : "";
+      if (!/^[0-9a-f]{40,256}$/.test(token)) {
+        return send(res, 400, { ok: false, error: "invalid activity push token" });
+      }
+      session.activityPushToken = token;
+      store.save();
+      return send(res, 200, { ok: true });
     }
 
     if (sub === "cancel" && req.method === "POST") {

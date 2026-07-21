@@ -26,7 +26,7 @@ function normalizeUsage(u) {
 }
 
 class Session {
-  constructor({ id, cwd, model, title, transport, effort, createdAt, turnCount, grokSessionId, planMode, autoApprove, usage, folder }) {
+  constructor({ id, cwd, model, title, transport, effort, createdAt, turnCount, grokSessionId, planMode, autoApprove, usage, folder, activityPushToken }) {
     this.id = id || randomUUID();        // valid v4 UUID — required by `grok -s`
     this.cwd = cwd;
     this.model = model;
@@ -37,6 +37,7 @@ class Session {
     this.planMode = planMode || false;
     this.autoApprove = autoApprove || false;    // "always allow" — auto-approve tool permissions
     this.grokSessionId = grokSessionId || null; // grok's ACP sessionId, for session/load resume
+    this.activityPushToken = activityPushToken || null; // ActivityKit push token for background Island
     this.createdAt = createdAt || new Date().toISOString();
     this.status = "idle";                // "idle" | "running"
     this.turnCount = turnCount || 0;
@@ -94,6 +95,7 @@ class Session {
       id: this.id, cwd: this.cwd, model: this.model, effort: this.effort,
       transport: this.transport, title: this.title, folder: this.folder || "", planMode: this.planMode,
       autoApprove: this.autoApprove, grokSessionId: this.grokSessionId,
+      activityPushToken: this.activityPushToken || null,
       createdAt: this.createdAt, turnCount: this.turnCount, usage: this.usage,
     };
   }
@@ -113,6 +115,26 @@ class Session {
         this._nextEventId = events[events.length - 1].id || 0;
       }
     } catch { /* ignore corrupt history */ }
+  }
+
+  /**
+   * Seed event history from an external source (e.g. Grok CLI chat_history.jsonl)
+   * without notifying live SSE subscribers. Used on resume so the phone replays
+   * the full conversation on first stream connect.
+   */
+  seedHistory(events) {
+    if (!Array.isArray(events) || !events.length) return 0;
+    // Replace empty history; if we already have bridge events, append after them.
+    for (const event of events) {
+      if (!event || typeof event !== "object") continue;
+      const id = ++this._nextEventId;
+      this._events.push({ id, event });
+      if (this._events.length > HISTORY_LIMIT) this._events.shift();
+    }
+    // Count user turns for the session list badge
+    const userTurns = events.filter((e) => e?.kind === "turn_start").length;
+    if (userTurns > this.turnCount) this.turnCount = userTurns;
+    return events.length;
   }
 
   // --- event fan-out ------------------------------------------------------

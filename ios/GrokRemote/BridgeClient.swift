@@ -144,6 +144,24 @@ struct BridgeClient {
         try Self.check(resp)
     }
 
+    /// Register ActivityKit push token so the bridge can update Live Activity in background.
+    func registerActivityToken(sessionId: String, token: String) async throws {
+        let (_, resp) = try await session.data(
+            for: try request("/api/sessions/\(sessionId)/activity-token", method: "POST",
+                             json: ["token": token]))
+        try Self.check(resp)
+    }
+
+    /// Probe APNs AuthKey + optional test push (bridge-side dry-run).
+    @discardableResult
+    func pushProbe(sendTest: Bool = false) async throws -> [String: Any] {
+        let (data, resp) = try await session.data(
+            for: try request("/api/push/probe", method: "POST",
+                             json: ["sendTest": sendTest]))
+        try Self.check(resp)
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
     /// Send a user message. Optional `images` are `[{name, mime, data: base64}]`.
     func send(sessionId: String, text: String, images: [[String: Any]]? = nil) async throws {
         var body: [String: Any] = ["text": text]

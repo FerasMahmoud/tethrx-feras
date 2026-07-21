@@ -39,6 +39,10 @@ final class ChatViewModel: ObservableObject {
         self.effort = session.effort ?? ""
         self.autoApprove = session.autoApprove ?? false
         self.usage = session.usage
+        liveActivity.onPushToken = { [weak self] token in
+            guard let self else { return }
+            Task { try? await self.client.registerActivityToken(sessionId: self.session.id, token: token) }
+        }
     }
 
     /// Change plan mode / reasoning effort / auto-approve for this session, live.

@@ -17,8 +17,10 @@ platform :ios do
       key: ENV.fetch("ASC_KEY")
     )
 
-    # Register bundle IDs + Push capability before match.
-    # App Groups deferred: profiles must include group.uk.firashome.tethrx first.
+    # Register bundle IDs + Push + App Groups before match.
+    # App Group id must exist on the team; we enable the capability and force profiles.
+    APP_GROUP_ID = "group.uk.firashome.tethrx"
+
     def ensure_bundle!(identifier, name, capabilities:)
       bid = Spaceship::ConnectAPI::BundleId.find(identifier)
       unless bid
@@ -41,17 +43,33 @@ platform :ios do
       bid
     end
 
+    # Best-effort: create App Group identifier via Portal if available.
+    begin
+      if defined?(Spaceship::Portal) && Spaceship::Portal.client
+        existing = Spaceship::Portal.app_group.all rescue []
+        unless existing.any? { |g| g.group_id == APP_GROUP_ID || g.app_group_id == APP_GROUP_ID }
+          UI.message("Creating App Group #{APP_GROUP_ID} …")
+          Spaceship::Portal.app_group.create!(group_identifier: APP_GROUP_ID, name: "TethrX Feras") rescue nil
+        end
+      end
+    rescue => e
+      UI.important("App Group create (Portal): #{e.message} — create group.uk.firashome.tethrx once in Developer portal if match fails")
+    end
+
     ensure_bundle!(
       "uk.firashome.tethrx",
       "TethrX Feras",
       capabilities: [
-        Spaceship::ConnectAPI::BundleIdCapability::Type::PUSH_NOTIFICATIONS
+        Spaceship::ConnectAPI::BundleIdCapability::Type::PUSH_NOTIFICATIONS,
+        Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
       ]
     )
     ensure_bundle!(
       "uk.firashome.tethrx.widget",
       "TethrX Feras Widget",
-      capabilities: []
+      capabilities: [
+        Spaceship::ConnectAPI::BundleIdCapability::Type::APP_GROUPS
+      ]
     )
 
     # App Store Connect app record (needs Admin; soft-fail if key cannot CREATE)
