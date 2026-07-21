@@ -1,52 +1,54 @@
-# TethrX Feras — feature roadmap
+# TethrX Feras — features
 
-Deep ship 2026-07-21: APNs-only push, UI polish, CLI resume, multimodal path.
+## Shipped
 
-## Shipped this turn
-
-| Feature | Where |
-|---------|--------|
-| **Paste** on Plan / Effort / Auto-approve row | `ChatView.swift` — Expand removed |
-| **Clear** when draft non-empty | same control row |
-| **Draft persistence** | per-session `UserDefaults` |
-| **APNs only** (no ntfy) | bridge `pushNotify` + `~/.grok-remote/config.json` |
-| **Push + App Groups entitlements** | `GrokRemote.entitlements` + widget |
-| **Device register** | `POST /api/devices` → APNs topic `uk.firashome.tethrx` |
-| **Grok CLI resume list** | `GET /api/grok-sessions` + app section |
-| **Resume via ACP session/load** | `POST /api/sessions` + `resumeGrokSessionId` |
-| **Image attach** | PhotosPicker → bridge writes `.tethrx-uploads/` + path in prompt |
-| **Live Activity** | foreground Island updates on turn/tool/complete |
-| **Paste token / URL** on pair | PairingView + AddComputerSheet |
-| **Siri cold-start URL** | IntentBridge → FerasDefaults.bridgeURL |
-
-## Already solid (keep)
-
+### Core
 - Live SSE (thoughts, tools, diffs)
+- Plan mode, effort, auto-approve
+- Tool approve/reject (+ lock-screen category when APNs works)
 - Queue while busy + stop
-- Plan mode + tool approvals
 - Dictation, snippets, multi-PC
-- Git review / commit / discard
-- Feras default bridge `https://tethrx.firashome.uk`
+- Git review / commit / discard / **Open PR**
+- **CI runs** in session details (`gh run list`)
+- Cost / context meter
+- Feras bridge `https://tethrx.firashome.uk`
 
-## Notifications (locked)
+### Notifications
+- APNs only (no ntfy)
+- Device register, probe, test push
+- Dual host auto (production + sandbox)
+- Quiet hours (bridge `quietHours` + app Settings)
+- Live Activity (FG + ActivityKit token path)
+- Hermes finish script → `tethrx-apns-notify`
 
-- **In-app / APNs only** — ntfy fully removed from push path and live config
-- Phone must enable Push in Settings once; token registers on connect
-- Approval pushes use category `PERMISSION` (Approve / Reject actions)
+### Sessions
+- Grok CLI resume list + **full history import**
+- Running-only filter
+- cwd recents chips + **Browse** sheet (`/api/fs`)
+- `@path` autocomplete (`/api/fs/search`)
 
-## Next (optional)
+### Input
+- Paste on Plan row (Expand removed)
+- Draft persistence
+- PhotosPicker images + **Paste image** from clipboard
+- ACP image blocks + path fallback
+- Cmd-Return send (keyboard shortcut)
+- `tethrx://share?text=` deep link (+ pair URL)
 
-| # | Feature | Effort |
-|---|---------|--------|
-| 1 | Hardware keyboard Cmd-Return send | S |
-| 2 | Share Extension (text → session) | M |
-| 3 | True ACP image content blocks (if grok supports) | L |
-| 4 | ActivityKit push for background Island | M |
-| 5 | cwd recents / bookmarks | S |
-
-## Ship loop
-
+### Ship
 ```bash
 cd ~/tethrx-feras && git add -A && git commit -m "feat: …" && git push
 gh workflow run testflight.yml -R FerasMahmoud/tethrx-feras
 ```
+
+## APNs note (2026-07-21)
+- Key `XF27A33VNY` from Drive: **auth OK on sandbox**
+- TestFlight device token is **production** → needs key that works on `api.push.apple.com`
+- If production returns `BadEnvironmentKeyInToken`, recreate APNs key with **Sandbox & Production** at developer.apple.com → Keys
+- Install: `install-apns-key AuthKey_XXX.p8`
+
+## Still optional later
+- Full Share Extension target (URL scheme covers share-in)
+- Android / PWA
+- Subagent tree
+- Dual-surface CLI leader mode

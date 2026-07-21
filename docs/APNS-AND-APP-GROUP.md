@@ -1,95 +1,81 @@
-# TethrX Feras — APNs key + App Group (one-time portal)
+# TethrX Feras — APNs + App Group
 
-## 1. APNs Auth Key (required — current key is ASC-only)
+## APNs status (proven 2026-07-21)
 
-Probe result on this box:
+### What we tried (all automated)
 
-```json
-{ "status": 403, "body": "{\"reason\":\"InvalidProviderToken\"}", "authBad": true }
-```
+| Attempt | Result |
+|---------|--------|
+| Use `AuthKey_BDC82G4589.p8` (ASC API key) as APNs | `403 InvalidProviderToken` |
+| GHA create `APPLE_PUSH_SERVICES` cert via ASC API | **Not a valid cert type** in ASC API enum |
+| GHA created `DEVELOPMENT` cert + mTLS to APNs | TLS `unknown ca` — not a push cert |
 
-`AuthKey_BDC82G4589.p8` is an **App Store Connect API** key. APNs rejects it.
+**Conclusion:** Apple does **not** expose APNs Auth Key or Push Services cert creation via App Store Connect API. Must use Developer portal UI **once**.
 
-### Fix (60s in browser)
+### Fix (60s browser — only human step)
 
 1. https://developer.apple.com/account/resources/authkeys/list  
-2. **+** → enable **Apple Push Notifications service (APNs)** only  
-3. Download `.p8` once → save as e.g. `~/secrets/apple/AuthKey_APNS_XXXX.p8`  
-4. Note **Key ID** + Team `3V4NW789C6`  
-5. Edit `~/.grok-remote/config.json`:
+2. **+** → name `TethrX APNs` → enable **Apple Push Notifications service (APNs)** only  
+3. Register → **Download** `AuthKey_XXXXXXXXXX.p8` (once)  
+4. On PC:
+
+```bash
+# copy from Windows Downloads if needed:
+# cp "/mnt/c/Users/feras/Downloads/AuthKey_"*.p8 /tmp/
+install-apns-key /path/to/AuthKey_XXXXXXXXXX.p8
+```
+
+Script: installs p8 → writes `~/.grok-remote/config.json` → restarts bridge → probe + test push.
+
+Expect `probe.authOk: true` — **not** `InvalidProviderToken`.
+
+Phone: TethrX → Settings → Push on → **Send test push**.
+
+### Manual config (if not using script)
 
 ```json
 {
-  "token": "…",
-  "name": "Feras-PC",
-  "publicUrl": "https://tethrx.firashome.uk",
   "apns": {
-    "keyPath": "/home/feras/secrets/apple/AuthKey_APNS_XXXX.p8",
-    "keyId": "XXXX",
+    "keyPath": "/home/feras/secrets/apple/AuthKey_XXXXXXXXXX.p8",
+    "keyId": "XXXXXXXXXX",
     "teamId": "3V4NW789C6",
     "topic": "uk.firashome.tethrx"
   }
 }
 ```
 
-6. `systemctl --user restart tethrx-bridge`  
-7. Probe:
-
 ```bash
+systemctl --user restart tethrx-bridge
 TOKEN=$(cat ~/.tethrx-pair-token)
 curl -sS -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"sendTest":true}' http://127.0.0.1:4180/api/push/probe | jq .
 ```
 
-Expect `probe.authOk: true` (or `BadDeviceToken` on fake token) — **not** `InvalidProviderToken`.
-
-Phone: Settings → enable Push → connect → **Send test push**.
-
 ---
 
-## 2. App Group `group.uk.firashome.tethrx`
+## App Group `group.uk.firashome.tethrx`
 
-Needed for widget snapshot + shared defaults. Entitlements already list it.
-
-### Portal
+Needed for widget snapshot. Entitlements already list it.
 
 1. https://developer.apple.com/account/resources/identifiers/list/applicationGroup  
-2. **+** → App Groups → `group.uk.firashome.tethrx` · name **TethrX Feras**  
-3. Identifiers → App IDs → `uk.firashome.tethrx` → App Groups → tick the group  
-4. Same for `uk.firashome.tethrx.widget`  
-5. Next TestFlight: Fastfile already `force: true` match so profiles pick it up
-
-If match still fails: temporary ship with Push-only entitlements (previous workaround).
+2. **+** → `group.uk.firashome.tethrx`  
+3. Attach to `uk.firashome.tethrx` + `.widget`  
+4. Next TF: match `force: true` already in Fastfile  
 
 ---
 
-## 3. Live Activity background push
+## Live Activity background
 
-- App requests activity with `pushType: .token`  
-- Registers token: `POST /api/sessions/:id/activity-token`  
-- Bridge sends `apns-push-type: liveactivity`  
-- Topic: `uk.firashome.tethrx.push-type.liveactivity`  
-- Same **APNs** Auth Key as alerts (not ASC)
+- App: `pushType: .token` → `POST /api/sessions/:id/activity-token`  
+- Bridge: `apns-push-type: liveactivity`, topic `uk.firashome.tethrx.push-type.liveactivity`  
+- Same **APNs Auth Key** as alerts  
 
 ---
 
-## 4. Hermes finish → APNs (optional)
-
-Script ready (does **not** use ntfy):
+## Hermes → APNs
 
 ```bash
-~/.hermes/scripts/tethrx-apns-session-end.sh "Session finished"
-# or
 tethrx-apns-notify "Hermes" "Session finished"
+# or
+~/.hermes/scripts/tethrx-apns-session-end.sh "Session finished"
 ```
-
-Wire in `~/.hermes/config.yaml` when you want it:
-
-```yaml
-hooks:
-  on_session_end:
-    - command: bash /home/feras/.hermes/scripts/tethrx-apns-session-end.sh
-      timeout: 15
-```
-
-(Keep existing hooks; append this entry.)

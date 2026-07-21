@@ -57,6 +57,19 @@
 	<string>Dictate messages to Grok using your voice.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Transcribe your dictated voice into text to send to Grok.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>uk.firashome.tethrx</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>tethrx</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+		</dict>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<!-- The bridge speaks plain HTTP on whatever network links the phone to your

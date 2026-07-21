@@ -41,6 +41,23 @@ final class AppState: ObservableObject {
     /// Set by a debug launch argument to auto-open a session (UI testing only).
     @Published var pendingOpenSessionId: String?
 
+    /// Text shared into the app via `tethrx://share?text=` — prefilled into the next chat draft.
+    @Published var pendingShareText: String?
+
+    /// Recent working directories from the bridge (`GET /api/cwd-recents`).
+    @Published var cwdRecents: [String] = []
+
+    /// Push quiet hours (local prefs). Bridge-side filtering is separate if configured.
+    @Published var quietStart: String {
+        didSet { store("push.quietStart", quietStart) }
+    }
+    @Published var quietEnd: String {
+        didSet { store("push.quietEnd", quietEnd) }
+    }
+    @Published var approvalsOnlyInQuiet: Bool {
+        didSet { UserDefaults.standard.set(approvalsOnlyInQuiet, forKey: "push.approvalsOnlyInQuiet") }
+    }
+
     /// Latest APNs device token (from PushManager); re-sent to the bridge on connect.
     var pushToken: String?
 
@@ -59,6 +76,9 @@ final class AppState: ObservableObject {
         activeBridgeId = d.string(forKey: "bridge.activeId")
         customFolders = d.stringArray(forKey: "bridge.folders") ?? []
         folderOrder = d.stringArray(forKey: "bridge.folderOrder") ?? []
+        quietStart = d.string(forKey: "push.quietStart") ?? "22:00"
+        quietEnd = d.string(forKey: "push.quietEnd") ?? "08:00"
+        approvalsOnlyInQuiet = d.bool(forKey: "push.approvalsOnlyInQuiet")
         if let data = d.data(forKey: "bridge.saved"),
            let list = try? JSONDecoder().decode([SavedBridge].self, from: data) {
             savedBridges = list
@@ -179,6 +199,7 @@ final class AppState: ObservableObject {
             publishWidgetSnapshot()
             if let t = pushToken { try? await client.registerDevice(t) }   // (re)register for push
             await reloadGrokCliSessions()                                  // best-effort CLI history
+            await reloadCwdRecents()                                       // cwd bookmarks for new sessions
             if !bootstrapping { Haptics.success() }   // confirm an explicit connect (not silent launch reconnect)
         } catch {
             connected = false
@@ -225,10 +246,33 @@ final class AppState: ObservableObject {
                 title: g.displayName
             )
             sessions.insert(s, at: 0)
+            if let cwd = g.cwd, !cwd.isEmpty { await rememberCwd(cwd) }
             return s
         } catch {
             errorMessage = friendly(error)
             return nil
+        }
+    }
+
+    /// Load MRU working directories from the bridge.
+    func reloadCwdRecents() async {
+        guard let client else { return }
+        cwdRecents = (try? await client.cwdRecents()) ?? cwdRecents
+    }
+
+    /// Remember a working directory (bridge MRU + local list).
+    func rememberCwd(_ path: String) async {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        // Optimistic local update so chips refresh immediately.
+        cwdRecents = [trimmed] + cwdRecents.filter { $0 != trimmed }
+        if cwdRecents.count > 20 { cwdRecents = Array(cwdRecents.prefix(20)) }
+        guard let client else { return }
+        do {
+            try await client.pushCwdRecent(trimmed)
+            cwdRecents = try await client.cwdRecents()
+        } catch {
+            // Keep optimistic list if the bridge is briefly unreachable.
         }
     }
 
@@ -250,15 +294,54 @@ final class AppState: ObservableObject {
     func newSession() async -> SessionInfo? {
         guard let client else { return nil }
         do {
-            let s = try await client.createSession(cwd: defaultCwd.isEmpty ? nil : defaultCwd,
+            let cwd = defaultCwd.isEmpty ? nil : defaultCwd
+            let s = try await client.createSession(cwd: cwd,
                                                    effort: defaultEffort.isEmpty ? nil : defaultEffort,
                                                    planMode: defaultPlanMode,
                                                    autoApprove: defaultAutoApprove)
             sessions.insert(s, at: 0)
+            if let cwd, !cwd.isEmpty { await rememberCwd(cwd) }
             return s
         } catch {
             errorMessage = friendly(error)
             return nil
+        }
+    }
+
+    /// Handle `tethrx://` deep links (pair + share).
+    func handleOpenURL(_ url: URL) {
+        guard url.scheme == "tethrx" else { return }
+        let host = (url.host ?? "").lowercased()
+        let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let items = comps?.queryItems ?? []
+
+        if host == "pair" || url.path == "/pair" || url.path.hasPrefix("/pair") {
+            let addr = items.first(where: { $0.name == "addr" })?.value
+            let tok = items.first(where: { $0.name == "token" })?.value
+            if let addr, !addr.isEmpty { baseURLString = addr }
+            if let tok, !tok.isEmpty { token = tok }
+            Task { await connect() }
+            return
+        }
+
+        if host == "share" || url.path == "/share" || url.path.hasPrefix("/share") {
+            let text = items.first(where: { $0.name == "text" })?.value
+                ?? items.first(where: { $0.name == "body" })?.value
+            if let text, !text.isEmpty {
+                pendingShareText = text
+                // Prefer last session if any; otherwise leave for user to open/create.
+                if let last = sessions.first {
+                    pendingOpenSessionId = last.id
+                }
+            }
+            return
+        }
+
+        // `tethrx://session/<id>` convenience (notifications / shortcuts).
+        if host == "session" || url.path.hasPrefix("/session") {
+            let id = items.first(where: { $0.name == "id" })?.value
+                ?? url.pathComponents.dropFirst().first
+            if let id, !id.isEmpty { pendingOpenSessionId = id }
         }
     }
 

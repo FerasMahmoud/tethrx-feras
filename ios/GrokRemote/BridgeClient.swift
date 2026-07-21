@@ -8,12 +8,14 @@ struct BridgeConfig: Equatable {
 enum BridgeError: LocalizedError {
     case badURL
     case badStatus(Int)
+    case serverMessage(String)
 
     var errorDescription: String? {
         switch self {
         case .badURL: return "Invalid server address."
         case .badStatus(401): return "Unauthorized — check your pairing token."
         case .badStatus(let code): return "Server returned status \(code)."
+        case .serverMessage(let msg): return msg
         }
     }
 }
@@ -205,6 +207,96 @@ struct BridgeClient {
         try Self.check(resp)
     }
 
+    // MARK: Filesystem browse + cwd recents
+
+    /// List a directory on the host (`GET /api/fs?path=`). Empty path → bridge default cwd.
+    func listFs(path: String) async throws -> FsListing {
+        guard var comps = URLComponents(url: try url("/api/fs"), resolvingAgainstBaseURL: false) else {
+            throw BridgeError.badURL
+        }
+        var items: [URLQueryItem] = []
+        if !path.isEmpty { items.append(URLQueryItem(name: "path", value: path)) }
+        if !items.isEmpty { comps.queryItems = items }
+        guard let u = comps.url else { throw BridgeError.badURL }
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 15
+        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        return try JSONDecoder().decode(FsListing.self, from: data)
+    }
+
+    /// Filename search under `cwd` (`GET /api/fs/search?q=&cwd=`). Used for `@path` autocomplete.
+    /// Bridge returns `{ results: [{ path, type }] }` — mapped to `FsEntry` with basename as `name`.
+    func searchFs(query: String, cwd: String?) async throws -> [FsEntry] {
+        guard var comps = URLComponents(url: try url("/api/fs/search"), resolvingAgainstBaseURL: false) else {
+            throw BridgeError.badURL
+        }
+        var items: [URLQueryItem] = [URLQueryItem(name: "q", value: query)]
+        if let cwd, !cwd.isEmpty { items.append(URLQueryItem(name: "cwd", value: cwd)) }
+        comps.queryItems = items
+        guard let u = comps.url else { throw BridgeError.badURL }
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 15
+        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+
+        struct SearchHit: Codable {
+            let path: String
+            let type: String
+            var size: Int?
+        }
+        struct ResultsWrapper: Codable { let results: [SearchHit] }
+        struct EntriesWrapper: Codable { let entries: [FsEntry] }
+
+        func mapHits(_ hits: [SearchHit]) -> [FsEntry] {
+            hits.map { h in
+                FsEntry(
+                    name: (h.path as NSString).lastPathComponent,
+                    type: h.type,
+                    size: h.size,
+                    path: h.path
+                )
+            }
+        }
+
+        if let w = try? JSONDecoder().decode(ResultsWrapper.self, from: data) {
+            return mapHits(w.results)
+        }
+        if let w = try? JSONDecoder().decode(EntriesWrapper.self, from: data) {
+            return w.entries
+        }
+        if let list = try? JSONDecoder().decode([FsEntry].self, from: data) {
+            return list
+        }
+        if let hits = try? JSONDecoder().decode([SearchHit].self, from: data) {
+            return mapHits(hits)
+        }
+        return []
+    }
+
+    /// Recent working directories on this bridge (`GET /api/cwd-recents`).
+    func cwdRecents() async throws -> [String] {
+        let (data, resp) = try await session.data(for: try request("/api/cwd-recents"))
+        try Self.check(resp)
+        if let list = try? JSONDecoder().decode([String].self, from: data) {
+            return list
+        }
+        struct Wrapper: Codable { let recents: [String] }
+        return try JSONDecoder().decode(Wrapper.self, from: data).recents
+    }
+
+    /// Push a path to the bridge's MRU cwd list (`POST /api/cwd-recents`).
+    func pushCwdRecent(_ path: String) async throws {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let (data, resp) = try await session.data(
+            for: try request("/api/cwd-recents", method: "POST", json: ["path": trimmed]))
+        try Self.check(resp)
+        _ = data
+    }
+
     // MARK: Git review
 
     func gitStatus(sessionId: String) async throws -> GitStatus {
@@ -248,6 +340,42 @@ struct BridgeClient {
         struct Result: Codable { let ok: Bool; let output: String?; let error: String? }
         let r = try JSONDecoder().decode(Result.self, from: data)
         return r.output ?? ""
+    }
+
+    /// Push + `gh pr create`. Returns the PR URL when available, else command output.
+    @discardableResult
+    func gitCreatePR(sessionId: String, title: String?, body: String?) async throws -> String {
+        var payload: [String: Any] = ["action": "pr"]
+        if let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["title"] = title
+        }
+        if let body { payload["body"] = body }
+        var req = try request("/api/sessions/\(sessionId)/git", method: "POST", json: payload)
+        req.timeoutInterval = 120   // push + gh can be slow
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        struct Result: Codable {
+            let ok: Bool
+            let url: String?
+            let output: String?
+            let error: String?
+        }
+        let r = try JSONDecoder().decode(Result.self, from: data)
+        if !r.ok {
+            throw BridgeError.serverMessage(r.error ?? r.output ?? "PR create failed")
+        }
+        if let url = r.url, !url.isEmpty { return url }
+        return r.output ?? ""
+    }
+
+    /// Recent GitHub Actions runs for the session cwd (`GET …/ci`).
+    func ciRuns(sessionId: String) async throws -> [CiRun] {
+        var req = try request("/api/sessions/\(sessionId)/ci")
+        req.timeoutInterval = 30
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        struct Wrapper: Codable { let runs: [CiRun]? }
+        return (try JSONDecoder().decode(Wrapper.self, from: data).runs) ?? []
     }
 
     /// Live event stream for a session. Each yielded value is one normalized

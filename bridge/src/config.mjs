@@ -57,6 +57,11 @@ const DEFAULTS = {
   // beyond loopback). See scripts/gen-cert.sh.
   tlsCert: process.env.GROK_REMOTE_TLS_CERT || "",
   tlsKey: process.env.GROK_REMOTE_TLS_KEY || "",
+
+  // Quiet hours for push: { start: "22:00", end: "08:00", approvalsOnly: true }.
+  // When set and current local time is in range, non-PERMISSION pushes are skipped
+  // (unless approvalsOnly is false, in which case all pushes still go through).
+  quietHours: null,
 };
 
 function load() {
@@ -95,7 +100,11 @@ function load() {
 
 function pickOverrides(stored) {
   const out = {};
-  for (const k of ["host", "port", "defaultCwd", "defaultModel", "defaultPermissionMode", "transport"]) {
+  for (const k of [
+    "host", "port", "defaultCwd", "defaultModel", "defaultPermissionMode",
+    "transport", "quietHours", "publicUrl", "askPermission", "ntfy",
+    "tlsCert", "tlsKey",
+  ]) {
     if (stored[k] !== undefined) out[k] = stored[k];
   }
   return out;

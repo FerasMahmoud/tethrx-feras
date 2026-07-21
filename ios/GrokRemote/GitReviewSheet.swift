@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Review what Grok changed in this session's folder, then commit or discard —
 /// so a remote run doesn't have to end with "I'll check it at my desk later".
@@ -35,10 +36,12 @@ struct GitReviewSheet: View {
                             Text("The working tree is clean\(status?.branch.map { " on \($0)" } ?? "").")
                                 .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
                         }
+                        openPRButton
                     } else {
                         header
                         fileList
                         commitBox
+                        openPRButton
                         discardButton
                     }
                     if let note {
@@ -149,6 +152,18 @@ struct GitReviewSheet: View {
         .disabled(working)
     }
 
+    private var openPRButton: some View {
+        Button { Task { await openPR() } } label: {
+            HStack(spacing: 10) {
+                if working { ProgressView().controlSize(.small).tint(.white) }
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 13, weight: .semibold))
+                Text(working ? "OPENING PR" : "OPEN PR").tracking(1.3)
+            }
+        }
+        .buttonStyle(PillButton(kind: .subtle))
+        .disabled(working)
+    }
+
     private func load() async {
         loading = true
         errorText = nil
@@ -168,6 +183,27 @@ struct GitReviewSheet: View {
             await load()
         } catch {
             errorText = "Commit failed. Check that git is configured (user.name / user.email) on that computer."
+        }
+    }
+
+    private func openPR() async {
+        working = true; errorText = nil; note = nil
+        defer { working = false }
+        let title = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let result = try await client.gitCreatePR(
+                sessionId: session.id,
+                title: title.isEmpty ? nil : title,
+                body: nil
+            )
+            Haptics.success()
+            note = result
+            if let url = URL(string: result), url.scheme?.hasPrefix("http") == true {
+                await MainActor.run { UIApplication.shared.open(url) }
+            }
+        } catch {
+            errorText = (error as? BridgeError)?.errorDescription
+                ?? error.localizedDescription
         }
     }
 

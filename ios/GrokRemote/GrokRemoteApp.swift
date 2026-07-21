@@ -38,6 +38,10 @@ struct TethrXApp: App {
                 default: break
                 }
             }
+            // Deep links: tethrx://pair?addr=&token=  ·  tethrx://share?text=
+            .onOpenURL { url in
+                app.handleOpenURL(url)
+            }
         }
     }
 }

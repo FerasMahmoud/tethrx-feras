@@ -13,9 +13,11 @@ struct SessionListView: View {
     @State private var folderText = ""
     @State private var collapsed: Set<String> = []
     @State private var query = ""
+    @State private var runningOnly = false
     @State private var showSettings = false
     @State private var creatingFolder = false
     @State private var newFolderName = ""
+    @State private var showFsBrowser = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -30,7 +32,10 @@ struct SessionListView: View {
             }
             .background(Grok.bg)
             .scrollIndicators(.hidden)
-            .refreshable { await app.reloadSessions() }
+            .refreshable {
+                await app.reloadSessions()
+                await app.reloadCwdRecents()
+            }
             .alert("Rename session", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
                 TextField("Name", text: $renameText)
                 Button("Save") {
@@ -59,20 +64,40 @@ struct SessionListView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsView().environmentObject(app).environmentObject(lock).environmentObject(snippets)
             }
+            .sheet(isPresented: $showFsBrowser) {
+                if let client = app.client {
+                    FsBrowserSheet(client: client, startPath: app.defaultCwd) { chosen in
+                        app.defaultCwd = chosen
+                        Task { await app.rememberCwd(chosen) }
+                    }
+                }
+            }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: SessionInfo.self) { session in
                 if let client = app.client {
                     ChatView(vm: ChatViewModel(client: client, session: session))
+                        .environmentObject(app)
                 } else {
                     ZStack { Grok.bg.ignoresSafeArea(); Eyebrow("DISCONNECTED") }
                 }
             }
         }
-        .task { await app.reloadSessions(); openPending() }
+        .task {
+            await app.reloadSessions()
+            await app.reloadCwdRecents()
+            openPending()
+        }
         .onChange(of: app.pendingOpenSessionId) { _, _ in openPending() }
         // The whole array, not just its count: switching to another computer can
         // land on the same number of sessions, which would swallow the deep-open.
         .onChange(of: app.sessions) { _, _ in openPending() }
+        // Share deep link with no sessions yet → open a new one so draft can prefill.
+        .onChange(of: app.pendingShareText) { _, text in
+            guard text != nil, path.isEmpty, app.sessions.isEmpty else { return }
+            Task {
+                if let s = await app.newSession() { path.append(s) }
+            }
+        }
     }
 
     /// Open the session a notification (or debug launch argument) pointed at.
@@ -114,7 +139,23 @@ struct SessionListView: View {
 
     private var workingDir: some View {
         VStack(alignment: .leading, spacing: 9) {
-            Eyebrow("WORKING DIRECTORY")
+            HStack(spacing: 10) {
+                Eyebrow("WORKING DIRECTORY")
+                Spacer(minLength: 0)
+                if app.client != nil {
+                    Button {
+                        Haptics.tap()
+                        showFsBrowser = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "folder").font(.system(size: 11, weight: .medium))
+                            Text("Browse…").font(Grok.mono(11))
+                        }
+                        .foregroundStyle(Grok.textDim)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
             FieldBox {
                 TextField("", text: $app.defaultCwd,
                           prompt: Text("/Users/you/project — blank = daemon default").foregroundColor(Grok.textFaint))
@@ -124,9 +165,41 @@ struct SessionListView: View {
                     .autocorrectionDisabled()
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if !app.cwdRecents.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(app.cwdRecents, id: \.self) { path in
+                            Button {
+                                Haptics.tap()
+                                app.defaultCwd = path
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "clock.arrow.circlepath")
+                                        .font(.system(size: 9, weight: .semibold))
+                                    Text(cwdChipLabel(path))
+                                        .lineLimit(1)
+                                }
+                                .font(Grok.mono(11, .medium))
+                                .foregroundStyle(app.defaultCwd == path ? Color.black : Grok.textDim)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(app.defaultCwd == path ? Color.white : Color.clear)
+                                .overlay(Capsule().stroke(
+                                    app.defaultCwd == path ? Color.clear : Grok.hairlineStrong, lineWidth: 1))
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
             Text("New sessions run Grok in this folder. Plan mode, effort, and approvals are set inside each session.")
                 .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
         }
+    }
+
+    private func cwdChipLabel(_ path: String) -> String {
+        let base = (path as NSString).lastPathComponent
+        return base.isEmpty ? path : base
     }
 
     // MARK: Sessions
@@ -144,7 +217,16 @@ struct SessionListView: View {
                     .foregroundStyle(Grok.textDim)
                 }
                 .buttonStyle(.plain)
-                Text("\(app.sessions.count)").font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
+                Text("\(filteredSessions.count)")
+                    .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
+            }
+            .padding(.bottom, 10)
+
+            // Filter chips
+            HStack(spacing: 8) {
+                filterChip("All", active: !runningOnly) { runningOnly = false }
+                filterChip("Running only", active: runningOnly) { runningOnly = true }
+                Spacer(minLength: 0)
             }
             .padding(.bottom, 12)
 
@@ -156,7 +238,9 @@ struct SessionListView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 24)
             } else if filteredSessions.isEmpty {
-                Text("// nothing matches \u{201C}\(query)\u{201D}")
+                Text(runningOnly && query.trimmingCharacters(in: .whitespaces).isEmpty
+                      ? "// no running sessions"
+                      : "// nothing matches \u{201C}\(query)\u{201D}")
                     .font(Grok.mono(12)).foregroundStyle(Grok.textFaint)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 24)
@@ -185,16 +269,34 @@ struct SessionListView: View {
         }
     }
 
-    // Session list, filtered by the search query (title, folder, working dir, id).
+    // Session list, filtered by running chip + search query (title, folder, cwd, id).
     private var filteredSessions: [SessionInfo] {
+        var list = app.sessions
+        if runningOnly { list = list.filter { $0.isRunning } }
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return app.sessions }
-        return app.sessions.filter {
+        guard !q.isEmpty else { return list }
+        return list.filter {
             $0.title.lowercased().contains(q)
             || ($0.folder?.lowercased().contains(q) ?? false)
             || ($0.cwd?.lowercased().contains(q) ?? false)
             || $0.id.lowercased().hasPrefix(q)
         }
+    }
+
+    private func filterChip(_ label: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
+            Text(label)
+                .font(Grok.mono(11, active ? .semibold : .regular))
+                .foregroundStyle(active ? Grok.bg : Grok.textDim)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(active ? Grok.accent : Grok.raised)
+                .overlay(Capsule().stroke(active ? Color.clear : Grok.hairline, lineWidth: 1))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     // Ungrouped sessions first, then folders alphabetically; order within a group preserved.
@@ -353,6 +455,124 @@ struct SessionListView: View {
                     .buttonStyle(.plain)
                 }
             }
+        }
+    }
+}
+
+// MARK: - Host filesystem browser (dirs only for cwd pick)
+
+/// Simple sheet: list directories via `listFs`, navigate, Use as working directory.
+struct FsBrowserSheet: View {
+    let client: BridgeClient
+    var startPath: String
+    var onPick: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var path: String = ""
+    @State private var entries: [FsEntry] = []
+    @State private var loading = true
+    @State private var errorText: String?
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(path.isEmpty ? "…" : path)
+                    .font(Grok.mono(11))
+                    .foregroundStyle(Grok.textDim)
+                    .lineLimit(2)
+                    .truncationMode(.head)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                Rectangle().fill(Grok.hairline).frame(height: 1)
+
+                if loading {
+                    ProgressView().tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let errorText {
+                    Text(errorText)
+                        .font(Grok.mono(12)).foregroundStyle(Grok.danger)
+                        .padding(20)
+                    Spacer()
+                } else {
+                    List {
+                        if canGoUp {
+                            Button {
+                                Task { await load(parentPath) }
+                            } label: {
+                                Label("..", systemImage: "arrow.up.left")
+                                    .font(Grok.mono(13)).foregroundStyle(Grok.textDim)
+                            }
+                            .listRowBackground(Grok.bg)
+                        }
+                        ForEach(dirEntries) { entry in
+                            Button {
+                                let next = path.hasSuffix("/") ? path + entry.name : path + "/" + entry.name
+                                Task { await load(next) }
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "folder.fill")
+                                        .font(.system(size: 13)).foregroundStyle(Grok.textDim)
+                                    Text(entry.name)
+                                        .font(Grok.mono(13)).foregroundStyle(Grok.text)
+                                    Spacer()
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(Grok.textFaint)
+                                }
+                            }
+                            .listRowBackground(Grok.bg)
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                }
+            }
+            .background(Grok.bg)
+            .navigationTitle("Browse")
+            .navigationBarTitleDisplayMode(.inline)
+            .grokBar()
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }.foregroundStyle(Grok.textDim)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Use") {
+                        if !path.isEmpty {
+                            onPick(path)
+                            dismiss()
+                        }
+                    }
+                    .fontWeight(.semibold)
+                    .foregroundStyle(path.isEmpty ? Grok.textFaint : Grok.text)
+                    .disabled(path.isEmpty)
+                }
+            }
+            .task { await load(startPath) }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var dirEntries: [FsEntry] {
+        entries.filter(\.isDir).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var canGoUp: Bool {
+        !path.isEmpty && path != "/" && path != parentPath
+    }
+
+    private var parentPath: String {
+        let p = (path as NSString).deletingLastPathComponent
+        return p.isEmpty ? "/" : p
+    }
+
+    private func load(_ target: String) async {
+        loading = true
+        errorText = nil
+        defer { loading = false }
+        do {
+            let listing = try await client.listFs(path: target)
+            path = listing.path
+            entries = listing.entries
+        } catch {
+            errorText = (error as? BridgeError)?.errorDescription ?? error.localizedDescription
         }
     }
 }

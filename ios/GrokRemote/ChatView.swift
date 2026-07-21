@@ -6,6 +6,7 @@ import PhotosUI
 struct ChatView: View {
     @StateObject var vm: ChatViewModel
     @EnvironmentObject var snippets: SnippetStore
+    @EnvironmentObject var app: AppState
     @StateObject private var dictation = Dictation()
     @State private var draft = ""
     @State private var showDetails = false
@@ -14,11 +15,16 @@ struct ChatView: View {
     @State private var composerExpanded = false
     @State private var pendingImages: [ChatViewModel.AttachedImage] = []
     @State private var photoItems: [PhotosPickerItem] = []
+    @State private var pathHits: [FsEntry] = []
+    @State private var pathSearchTask: Task<Void, Never>?
     @FocusState private var composerFocused: Bool
 
     private var name: String { vm.session.displayName }
     private var clipboardHasText: Bool {
         UIPasteboard.general.hasStrings
+    }
+    private var clipboardHasImage: Bool {
+        UIPasteboard.general.hasImages
     }
     private var draftKey: String { "draft.\(vm.session.id)" }
     private var canSend: Bool {
@@ -41,10 +47,13 @@ struct ChatView: View {
             if draft.isEmpty, let saved = UserDefaults.standard.string(forKey: draftKey), !saved.isEmpty {
                 draft = saved
             }
+            consumePendingShare()
         }
         .onChange(of: draft) { _, v in
             UserDefaults.standard.set(v, forKey: draftKey)
+            schedulePathSearch()
         }
+        .onChange(of: app.pendingShareText) { _, _ in consumePendingShare() }
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
@@ -176,6 +185,7 @@ struct ChatView: View {
             snippetsRow
             chatControls
             commandPalette
+            pathPalette
             pendingImagesRow
 
             HStack(alignment: .bottom, spacing: 10) {
@@ -190,7 +200,7 @@ struct ChatView: View {
                         .focused($composerFocused)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        // iPad hardware keyboard: Return still inserts newline; send via toolbar/button.
+                        // Soft keyboard: Return inserts newline (axis: .vertical). Hardware: Cmd-Return on send.
                     PhotosPicker(selection: $photoItems, maxSelectionCount: 4, matching: .images) {
                         Image(systemName: "photo")
                             .font(.system(size: 15, weight: .medium))
@@ -315,11 +325,13 @@ struct ChatView: View {
     }
 
     // Send when idle; when a turn is running, queue the draft (＋) or stop (■).
+    // ⌘↩ = send / queue (iPad hardware keyboard). Soft Return still inserts newline.
     @ViewBuilder private var trailingButtons: some View {
         if vm.busy {
             HStack(spacing: 8) {
                 if canSend {
-                    CircleIconButton(system: "arrow.up") {
+                    CircleIconButton(system: "arrow.up",
+                                     shortcut: KeyboardShortcut(.return, modifiers: .command)) {
                         // Must stop dictation here too, or the recogniser's next partial
                         // result refills the composer with the message just queued.
                         if dictation.isRecording { dictation.stop() }
@@ -334,9 +346,11 @@ struct ChatView: View {
                 CircleIconButton(system: "stop.fill", danger: true) { Task { await vm.cancel() } }
             }
         } else {
-            CircleIconButton(system: "arrow.up", filled: canSend, enabled: canSend) {
+            CircleIconButton(system: "arrow.up", filled: canSend, enabled: canSend,
+                             shortcut: KeyboardShortcut(.return, modifiers: .command)) {
                 submit(draft)
             }
+            .help("Send (⌘↩)")
         }
     }
 
@@ -400,6 +414,18 @@ struct ChatView: View {
                 .padding(.horizontal, 10).padding(.vertical, 6)
                 .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
                 .accessibilityLabel("Paste from clipboard")
+
+                if clipboardHasImage {
+                    Button { pasteClipboardImage() } label: {
+                        Label("Paste image", systemImage: "photo.on.rectangle")
+                            .font(Grok.mono(11, .medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Grok.textDim)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
+                    .accessibilityLabel("Paste image from clipboard")
+                }
 
                 if !draft.isEmpty {
                     Button {
@@ -476,6 +502,138 @@ struct ChatView: View {
             .padding(.horizontal, 14)
             .padding(.top, 10)
         }
+    }
+
+    /// `@path` autocomplete — last word starts with `@`, results from `searchFs`.
+    @ViewBuilder private var pathPalette: some View {
+        if !pathHits.isEmpty, atToken != nil {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(pathHits) { entry in
+                        Button { insertPath(entry) } label: { pathRow(entry) }
+                            .buttonStyle(.plain)
+                        if entry.id != pathHits.last?.id {
+                            Rectangle().fill(Grok.hairline).frame(height: 1).padding(.leading, 14)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 190)
+            .background(Grok.raised)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Grok.hairlineStrong, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+        }
+    }
+
+    private func pathRow(_ entry: FsEntry) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: entry.isDir ? "folder.fill" : "doc")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Grok.textDim)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.name)
+                    .font(Grok.mono(13, .semibold)).foregroundStyle(Grok.accent)
+                    .lineLimit(1)
+                if let p = entry.path, !p.isEmpty {
+                    Text(p).font(Grok.mono(10)).foregroundStyle(Grok.textDim)
+                        .lineLimit(1).truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 0)
+            Text(entry.isDir ? "dir" : "file")
+                .font(Grok.mono(8, .bold)).tracking(0.5).foregroundStyle(Grok.textFaint)
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .overlay(Capsule().stroke(Grok.hairline, lineWidth: 1))
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    /// Last whitespace-delimited token if it starts with `@` (query after `@`).
+    private var atToken: (range: Range<String.Index>, query: String)? {
+        let trimmedEnd = draft
+        guard let lastSpace = trimmedEnd.lastIndex(where: { $0.isWhitespace }) else {
+            guard trimmedEnd.hasPrefix("@") else { return nil }
+            let q = String(trimmedEnd.dropFirst())
+            if q.contains("/") && q.count > 1 { return nil } // already a path fragment with slash — still allow search
+            return (trimmedEnd.startIndex..<trimmedEnd.endIndex, q)
+        }
+        let start = trimmedEnd.index(after: lastSpace)
+        let token = trimmedEnd[start...]
+        guard token.hasPrefix("@") else { return nil }
+        let q = String(token.dropFirst())
+        return (start..<trimmedEnd.endIndex, q)
+    }
+
+    private func schedulePathSearch() {
+        pathSearchTask?.cancel()
+        guard let token = atToken else {
+            pathHits = []
+            return
+        }
+        // Don't fight slash-command palette.
+        if draft.hasPrefix("/") { pathHits = []; return }
+        let q = token.query
+        // Empty `@` → wait for a character so we don't dump the whole tree.
+        guard q.count >= 1 else {
+            pathHits = []
+            return
+        }
+        let cwd = vm.session.cwd ?? app.defaultCwd
+        pathSearchTask = Task {
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled else { return }
+            let hits = (try? await vm.client.searchFs(query: q, cwd: cwd.isEmpty ? nil : cwd)) ?? []
+            guard !Task.isCancelled else { return }
+            await MainActor.run { pathHits = hits }
+        }
+    }
+
+    private func insertPath(_ entry: FsEntry) {
+        Haptics.tap()
+        guard let token = atToken else { return }
+        let absolute = entry.path
+            ?? {
+                let base = vm.session.cwd ?? app.defaultCwd
+                if base.isEmpty { return entry.name }
+                return base.hasSuffix("/") ? base + entry.name : base + "/" + entry.name
+            }()
+        draft.replaceSubrange(token.range, with: absolute + (entry.isDir ? "/" : " "))
+        pathHits = []
+        composerFocused = true
+    }
+
+    /// Prefill composer from `tethrx://share?text=` once per open.
+    private func consumePendingShare() {
+        guard let text = app.pendingShareText, !text.isEmpty else { return }
+        app.pendingShareText = nil
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            draft = text
+        } else {
+            draft = draft.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + text
+        }
+        if text.count > 400 { composerExpanded = true }
+        composerFocused = true
+    }
+
+    /// Attach clipboard image as JPEG (same path as PhotosPicker).
+    private func pasteClipboardImage() {
+        guard let ui = UIPasteboard.general.image,
+              let jpeg = ui.jpegData(compressionQuality: 0.82) else {
+            Haptics.tap()
+            return
+        }
+        guard jpeg.count <= 6 * 1024 * 1024 else {
+            vm.errorMessage = "Image too large (max 6 MB)."
+            return
+        }
+        let name = "paste-\(Int(Date().timeIntervalSince1970)).jpg"
+        pendingImages.append(.init(name: name, mime: "image/jpeg", data: jpeg))
+        Haptics.tap()
     }
 
     private func commandRow(_ cmd: SlashCommand) -> some View {
@@ -950,6 +1108,9 @@ struct SessionDetailsSheet: View {
     @ObservedObject var vm: ChatViewModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var ciRuns: [CiRun] = []
+    @State private var ciLoading = false
+
     private var u: SessionUsage { vm.usage ?? SessionUsage() }
     private var session: SessionInfo { vm.session }
 
@@ -959,6 +1120,7 @@ struct SessionDetailsSheet: View {
                 VStack(alignment: .leading, spacing: 28) {
                     context
                     tokens
+                    if !ciRuns.isEmpty || ciLoading { ciSection }
                     technical
                 }
                 .padding(20)
@@ -975,6 +1137,7 @@ struct SessionDetailsSheet: View {
             }
         }
         .preferredColorScheme(.dark)
+        .task { await loadCI() }
     }
 
     private var context: some View {
@@ -1013,6 +1176,51 @@ struct SessionDetailsSheet: View {
         }
     }
 
+    private var ciSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Eyebrow("CI")
+                Spacer()
+                if ciLoading {
+                    ProgressView().controlSize(.mini).tint(.white)
+                }
+            }
+            if ciRuns.isEmpty && !ciLoading {
+                Text("// no recent runs")
+                    .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
+            } else {
+                ForEach(ciRuns) { run in
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(ciColor(run))
+                            .frame(width: 7, height: 7)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(run.name ?? "workflow")
+                                .font(Grok.mono(12)).foregroundStyle(Grok.text).lineLimit(1)
+                            HStack(spacing: 6) {
+                                if let s = run.status { Text(s).font(Grok.mono(10)).foregroundStyle(Grok.textFaint) }
+                                if let c = run.conclusion, !c.isEmpty, c != "null" {
+                                    Text(c).font(Grok.mono(10)).foregroundStyle(ciColor(run))
+                                }
+                                if let b = run.headBranch, !b.isEmpty {
+                                    Text(b).font(Grok.mono(10)).foregroundStyle(Grok.textDim).lineLimit(1)
+                                }
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        if let urlStr = run.url, let url = URL(string: urlStr) {
+                            Link(destination: url) {
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(Grok.textFaint)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var technical: some View {
         VStack(alignment: .leading, spacing: 12) {
             Eyebrow("TECHNICAL")
@@ -1032,6 +1240,19 @@ struct SessionDetailsSheet: View {
             Spacer()
             Text(v).font(Grok.mono(12)).foregroundStyle(Grok.text).lineLimit(1).truncationMode(.middle)
         }
+    }
+
+    private func ciColor(_ run: CiRun) -> Color {
+        if run.isFailure { return Grok.danger }
+        if run.isSuccess { return Grok.accent }
+        if run.isInProgress { return Grok.textDim }
+        return Grok.textFaint
+    }
+
+    private func loadCI() async {
+        ciLoading = true
+        defer { ciLoading = false }
+        ciRuns = (try? await vm.client.ciRuns(sessionId: session.id)) ?? []
     }
 }
 

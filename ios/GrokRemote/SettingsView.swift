@@ -200,7 +200,37 @@ struct SettingsView: View {
                 }
                 .buttonStyle(PillButton(kind: .subtle))
             }
+
+            // Quiet hours — local UserDefaults only in Phase 1. Bridge-side filtering
+            // can read the same keys later; no PATCH /api/config yet.
+            Rectangle().fill(Grok.hairline).frame(height: 1).padding(.vertical, 4)
+            Eyebrow("QUIET HOURS")
+            HStack(spacing: 12) {
+                quietField("Start", text: $app.quietStart)
+                quietField("End", text: $app.quietEnd)
+            }
+            toggleRow("Approvals only in quiet hours",
+                      "When quiet, prefer approval pushes over turn-complete noise (local pref; bridge may ignore until configured)",
+                      $app.approvalsOnlyInQuiet)
+            Text("Times are local (HH:mm), e.g. 22:00 → 08:00. Stored on device as push.quietStart / push.quietEnd / push.approvalsOnlyInQuiet.")
+                .font(Grok.mono(10)).foregroundStyle(Grok.textFaint)
         }
+    }
+
+    private func quietField(_ label: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(label).font(Grok.mono(10)).foregroundStyle(Grok.textFaint)
+            FieldBox {
+                TextField("HH:mm", text: text)
+                    .font(Grok.mono(13))
+                    .foregroundStyle(Grok.text)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.numbersAndPunctuation)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private var snippetsSection: some View {

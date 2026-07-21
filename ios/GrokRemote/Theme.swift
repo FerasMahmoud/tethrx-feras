@@ -119,6 +119,8 @@ struct CircleIconButton: View {
     var filled = false
     var danger = false
     var enabled = true
+    /// Optional hardware-keyboard shortcut (e.g. ⌘↩ send on iPad).
+    var shortcut: KeyboardShortcut? = nil
     let action: () -> Void
 
     var body: some View {
@@ -134,6 +136,20 @@ struct CircleIconButton: View {
             .frame(width: 40, height: 40)
         }
         .disabled(!enabled)
+        .modifier(OptionalKeyboardShortcut(shortcut: shortcut))
+    }
+}
+
+/// Applies `.keyboardShortcut` only when non-nil (keeps CircleIconButton call sites simple).
+private struct OptionalKeyboardShortcut: ViewModifier {
+    var shortcut: KeyboardShortcut?
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let shortcut {
+            content.keyboardShortcut(shortcut)
+        } else {
+            content
+        }
     }
 }
 

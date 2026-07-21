@@ -223,6 +223,57 @@ struct GitStatus: Codable {
     var changedCount: Int { files?.count ?? 0 }
 }
 
+/// One GitHub Actions run from `GET /api/sessions/:id/ci`.
+struct CiRun: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String?
+    var status: String?
+    var conclusion: String?
+    var url: String?
+    var headBranch: String?
+
+    /// Compact label for toolbar / list chips.
+    var shortLabel: String {
+        let n = (name ?? "CI").trimmingCharacters(in: .whitespaces)
+        if let conclusion, !conclusion.isEmpty, conclusion != "null" {
+            return "\(n) · \(conclusion)"
+        }
+        if let status, !status.isEmpty {
+            return "\(n) · \(status)"
+        }
+        return n.isEmpty ? "CI" : n
+    }
+
+    var isFailure: Bool {
+        let c = (conclusion ?? "").lowercased()
+        return c == "failure" || c == "cancelled" || c == "timed_out"
+    }
+
+    var isSuccess: Bool { (conclusion ?? "").lowercased() == "success" }
+    var isInProgress: Bool {
+        let s = (status ?? "").lowercased()
+        return s == "in_progress" || s == "queued" || s == "waiting" || s == "pending"
+    }
+}
+
+/// One entry from `GET /api/fs` or `GET /api/fs/search`.
+struct FsEntry: Codable, Identifiable, Hashable {
+    var id: String { (path ?? name) + type }
+    let name: String
+    let type: String // "file" | "dir"
+    var size: Int?
+    /// Absolute path when returned by search (list endpoint only has name + parent path).
+    var path: String?
+
+    var isDir: Bool { type == "dir" }
+}
+
+/// `GET /api/fs?path=…` directory listing.
+struct FsListing: Codable {
+    let path: String
+    let entries: [FsEntry]
+}
+
 /// A before/after edit Grok made to a file (from an edit tool's diff).
 struct FileDiff: Equatable {
     var path: String

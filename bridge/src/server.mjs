@@ -10,6 +10,10 @@
 //   POST /api/sessions/:id/messages      -> { text?, images?, permissionMode?, alwaysApprove?, allow?, deny? }
 //   POST /api/sessions/:id/cancel        -> abort the running turn
 //   GET  /api/sessions/:id/stream        -> SSE stream of normalized Grok events
+//   GET  /api/fs?path=…                  -> list directory { path, entries }
+//   GET  /api/fs/search?q=…&cwd=…        -> name search under cwd
+//   GET  /api/cwd-recents                -> recent working directories
+//   POST /api/cwd-recents { path }       -> push a cwd recent
 //   GET  /                               -> bundled web test client
 //
 // Auth: every /api route (except health) requires `Authorization: Bearer <token>`.
@@ -19,11 +23,11 @@
 import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, normalize as normPath, sep, basename } from "node:path";
+import { dirname, join, normalize as normPath, sep, basename, resolve as resolvePath } from "node:path";
 import { timingSafeEqual, randomBytes } from "node:crypto";
-import { networkInterfaces, hostname } from "node:os";
+import { networkInterfaces, hostname, homedir } from "node:os";
 
 import { config } from "./config.mjs";
 import { SessionStore } from "./sessions.mjs";
@@ -34,6 +38,7 @@ import { listGrokSessions } from "./grok-sessions.mjs";
 import { seedSessionFromCli } from "./import-cli-history.mjs";
 import * as awake from "./awake.mjs";
 import * as git from "./git.mjs";
+import { listDir, searchPaths } from "./fs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, "..", "public");
@@ -227,10 +232,76 @@ async function serveStatic(res, urlPath) {
 
 // ---- turn execution --------------------------------------------------------
 
+// ---- cwd recents (phone autocomplete) --------------------------------------
+
+const CWD_RECENTS_PATH = join(config.stateDir, "cwd-recents.json");
+const CWD_RECENTS_MAX = 20;
+
+function loadCwdRecents() {
+  try {
+    if (!existsSync(CWD_RECENTS_PATH)) return [];
+    const data = JSON.parse(readFileSync(CWD_RECENTS_PATH, "utf8"));
+    return Array.isArray(data?.recents) ? data.recents.filter((p) => typeof p === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCwdRecents(recents) {
+  try {
+    writeFileSync(CWD_RECENTS_PATH, JSON.stringify({ recents }, null, 2), { mode: 0o600 });
+  } catch (err) {
+    console.error("[bridge] cwd-recents save failed:", err?.message || err);
+  }
+}
+
+/** Push path to front of recents (unique, max 20). Returns updated list. */
+function recordCwdRecent(path) {
+  if (!path || typeof path !== "string") return loadCwdRecents();
+  let abs;
+  try {
+    abs = resolvePath(path.replace(/^~(?=\/|$)/, homedir()));
+  } catch {
+    return loadCwdRecents();
+  }
+  const prev = loadCwdRecents().filter((p) => p !== abs);
+  const recents = [abs, ...prev].slice(0, CWD_RECENTS_MAX);
+  saveCwdRecents(recents);
+  return recents;
+}
+
+// Quiet hours: local clock in [start, end). Supports wrap past midnight (22:00–08:00).
+function inQuietHours(qh) {
+  if (!qh || typeof qh !== "object") return false;
+  const start = parseHm(qh.start);
+  const end = parseHm(qh.end);
+  if (start == null || end == null) return false;
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  if (start === end) return false;
+  if (start < end) return mins >= start && mins < end;
+  return mins >= start || mins < end; // wraps midnight
+}
+
+function parseHm(s) {
+  if (typeof s !== "string") return null;
+  const m = s.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
 // Push a notification via APNs, but only when nobody is actively watching this
 // session (so you're alerted precisely when the app is backgrounded).
+// Quiet hours (config.quietHours): when active and approvalsOnly, skip non-PERMISSION.
 async function pushNotify(session, { title, message, category, requestId, allowOptionId, rejectOptionId }) {
   if (session.subscriberCount > 0) return;   // someone's watching live — no need to alert
+  const qh = config.quietHours;
+  if (qh && inQuietHours(qh) && qh.approvalsOnly !== false && category !== "PERMISSION") {
+    return;
+  }
   apns.send({
     title, body: message, sessionId: session.id,
     category, requestId, allowOptionId, rejectOptionId,
@@ -544,6 +615,47 @@ async function handle(req, res) {
     return send(res, 200, { sessions: listGrokSessions({ limit, cwdFilter: cwd }) });
   }
 
+  // Directory listing for phone path autocomplete.
+  if (pathname === "/api/fs" && req.method === "GET") {
+    const p = url.searchParams.get("path") || config.defaultCwd || homedir();
+    const limit = Number(url.searchParams.get("limit") || 200);
+    const showHidden = url.searchParams.get("showHidden") === "1"
+      || url.searchParams.get("showHidden") === "true";
+    try {
+      return send(res, 200, listDir(p, { limit, showHidden }));
+    } catch (err) {
+      const code = err?.code;
+      const status = code === "ENOENT" ? 404 : code === "EACCES" || code === "EPERM" ? 403 : 400;
+      return send(res, status, { error: err?.message || "cannot list directory", code });
+    }
+  }
+
+  // Path search / autocomplete.
+  if (pathname === "/api/fs/search" && req.method === "GET") {
+    const q = url.searchParams.get("q") || url.searchParams.get("query") || "";
+    const cwd = url.searchParams.get("cwd") || config.defaultCwd || homedir();
+    const limit = Number(url.searchParams.get("limit") || 30);
+    const showHidden = url.searchParams.get("showHidden") === "1"
+      || url.searchParams.get("showHidden") === "true";
+    try {
+      return send(res, 200, { results: searchPaths(q, { cwd, limit, showHidden }) });
+    } catch (err) {
+      return send(res, 400, { error: err?.message || "search failed", results: [] });
+    }
+  }
+
+  // Recent working directories (MRU) for phone cwd picker.
+  if (pathname === "/api/cwd-recents" && req.method === "GET") {
+    return send(res, 200, { recents: loadCwdRecents() });
+  }
+  if (pathname === "/api/cwd-recents" && req.method === "POST") {
+    const body = await readJson(req).catch(() => ({}));
+    const path = typeof body.path === "string" ? body.path.trim()
+      : typeof body.cwd === "string" ? body.cwd.trim() : "";
+    if (!path) return send(res, 400, { error: "missing 'path'" });
+    return send(res, 200, { recents: recordCwdRecent(path) });
+  }
+
   // /api/sessions
   if (pathname === "/api/sessions" && req.method === "GET") {
     return send(res, 200, { sessions: store.list() });
@@ -553,8 +665,9 @@ async function handle(req, res) {
     const resumeId = typeof body.resumeGrokSessionId === "string" && body.resumeGrokSessionId.trim()
       ? body.resumeGrokSessionId.trim()
       : undefined;
+    const sessionCwd = body.cwd || config.defaultCwd;
     const session = store.create({
-      cwd: body.cwd || config.defaultCwd,
+      cwd: sessionCwd,
       model: body.model || config.defaultModel,
       effort: body.effort,
       transport: body.transport || config.transport,
@@ -563,6 +676,8 @@ async function handle(req, res) {
       title: body.title || (resumeId ? "Resumed" : undefined),
       grokSessionId: resumeId,
     });
+    // Track explicit cwd for phone recents picker.
+    if (body.cwd) recordCwdRecent(sessionCwd);
     // Resume from Grok CLI: import chat_history.jsonl so the phone is NOT empty.
     // ACP session/load still restores model context on first turn; this is the UI transcript.
     let imported = null;
@@ -747,7 +862,7 @@ async function handle(req, res) {
       if (file) return send(res, 200, { diff: await git.diff(session.cwd, file) });
       return send(res, 200, await git.status(session.cwd));
     }
-    // { action: "commit", message } | { action: "discard" }
+    // { action: "commit", message } | { action: "discard" } | { action: "pr", title?, body? }
     if (sub === "git" && req.method === "POST") {
       const body = await readJson(req).catch(() => ({}));
       if (body.action === "commit") {
@@ -756,7 +871,18 @@ async function handle(req, res) {
         return send(res, 200, await git.commit(session.cwd, message));
       }
       if (body.action === "discard") return send(res, 200, await git.discard(session.cwd));
+      if (body.action === "pr") {
+        return send(res, 200, await git.createPR(session.cwd, {
+          title: body.title,
+          body: body.body,
+        }));
+      }
       return send(res, 400, { error: "unknown action" });
+    }
+
+    // Recent GitHub Actions runs for the session cwd: GET /api/sessions/:id/ci
+    if (sub === "ci" && req.method === "GET") {
+      return send(res, 200, await git.ciRuns(session.cwd));
     }
 
     if (sub === "stream" && req.method === "GET") {
