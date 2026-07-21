@@ -122,22 +122,27 @@ struct ChatView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(vm.items) { item in
-                                switch item.role {
-                                case .permission:
+                            ForEach(TranscriptBlock.fold(vm.items)) { block in
+                                switch block {
+                                case .permission(let item):
                                     PermissionCard(item: item) { optionId, always in
                                         Task { await vm.decide(item, optionId: optionId, always: always) }
-                                    }.id(item.id)
-                                case .plan:
+                                    }.id(block.id)
+                                case .plan(let item):
                                     PlanCard(item: item) { approved in
                                         Task { await vm.decidePlan(item, approved: approved) }
-                                    }.id(item.id)
-                                default:
+                                    }.id(block.id)
+                                case .thinking(let items):
+                                    ThinkingGroupView(
+                                        items: items,
+                                        live: vm.busy && items.contains(where: { $0.toolStatus == "running" })
+                                    ).id(block.id)
+                                case .single(let item):
                                     ChatBubble(
                                         item: item,
                                         forceExpanded: vm.busy && item.id == vm.items.last(where: { $0.role == .assistant })?.id,
                                         onOpenFull: { fullReaderItem = item }
-                                    ).id(item.id)
+                                    ).id(block.id)
                                         .contextMenu {
                                             copyButton(item.text)
                                             if item.role == .assistant || item.role == .user {
@@ -847,6 +852,153 @@ struct TypingIndicator: View {
     }
 }
 
+// MARK: - Transcript folding (tools + thoughts → one Thinking container)
+
+/// Groups consecutive tool/thought rows so the chat stays scannable.
+enum TranscriptBlock: Identifiable {
+    case single(ChatItem)
+    case thinking([ChatItem])
+    case permission(ChatItem)
+    case plan(ChatItem)
+
+    var id: String {
+        switch self {
+        case .single(let i), .permission(let i), .plan(let i): return i.id.uuidString
+        case .thinking(let items): return "think-" + items.map { $0.id.uuidString }.joined(separator: ".")
+        }
+    }
+
+    static func fold(_ items: [ChatItem]) -> [TranscriptBlock] {
+        var out: [TranscriptBlock] = []
+        var buf: [ChatItem] = []
+        func flush() {
+            guard !buf.isEmpty else { return }
+            out.append(buf.count == 1 && buf[0].role == .thought
+                       ? .thinking(buf)   // still one Thinking shell
+                       : .thinking(buf))
+            buf = []
+        }
+        for item in items {
+            switch item.role {
+            case .tool, .thought:
+                buf.append(item)
+            case .permission:
+                flush()
+                out.append(.permission(item))
+            case .plan:
+                flush()
+                out.append(.plan(item))
+            default:
+                flush()
+                out.append(.single(item))
+            }
+        }
+        flush()
+        return out
+    }
+}
+
+/// One collapsible "Thinking" shell for a run of tool calls + thought chunks.
+struct ThinkingGroupView: View {
+    let items: [ChatItem]
+    var live: Bool = false
+    @State private var open = false
+
+    private var toolCount: Int { items.filter { $0.role == .tool }.count }
+    private var thoughtCount: Int { items.filter { $0.role == .thought }.count }
+    private var failed: Bool { items.contains { $0.toolStatus == "failed" } }
+
+    private var preview: String {
+        if live { return "working…" }
+        if let lastTool = items.last(where: { $0.role == .tool }) {
+            let name = lastTool.text.split(separator: " ").first.map(String.init) ?? lastTool.text
+            return "\(toolCount) tool\(toolCount == 1 ? "" : "s") · \(ChatBubble.plainPreview(name, limit: 40))"
+        }
+        if let th = items.last(where: { $0.role == .thought }) {
+            return ChatBubble.plainPreview(th.text, limit: 48)
+        }
+        return "\(items.count) step\(items.count == 1 ? "" : "s")"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { open.toggle() }
+                Haptics.tap()
+            } label: {
+                HStack(spacing: 8) {
+                    Text("THINKING")
+                        .font(Grok.mono(9, .bold))
+                        .tracking(0.8)
+                        .foregroundStyle(failed ? Grok.danger : Grok.textFaint)
+                    if live {
+                        ProgressView().controlSize(.mini).tint(Grok.textDim)
+                    }
+                    Text(preview)
+                        .font(Grok.mono(11))
+                        .foregroundStyle(Grok.textFaint)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if toolCount > 0 {
+                        Text("\(toolCount)")
+                            .font(Grok.mono(9, .bold))
+                            .foregroundStyle(Grok.textFaint)
+                            .padding(.horizontal, 5).padding(.vertical, 1)
+                            .overlay(Capsule().stroke(Grok.hairline, lineWidth: 1))
+                    }
+                    Image(systemName: open ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Grok.textFaint)
+                }
+                .padding(.vertical, 10)
+                .padding(.horizontal, 12)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(open ? "Collapse thinking" : "Expand thinking")
+
+            if open {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(items) { item in
+                        if item.role == .thought {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("THOUGHT")
+                                    .font(Grok.mono(8, .bold)).tracking(0.6)
+                                    .foregroundStyle(Grok.textFaint)
+                                Text(item.text)
+                                    .font(Grok.mono(12))
+                                    .foregroundStyle(Grok.textDim)
+                                    .lineSpacing(3)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(10)
+                            .background(Grok.bg.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                        } else {
+                            ToolLine(item: item)
+                                .padding(8)
+                                .background(Grok.bg.opacity(0.5))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 12)
+            }
+        }
+        .background(Grok.raised.opacity(0.45))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(
+            failed ? Grok.danger.opacity(0.35) : Grok.hairline, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        // Auto-expand while tools are still running so progress is visible.
+        .onChange(of: live) { _, isLive in
+            if isLive { open = true }
+        }
+        .onAppear { if live { open = true } }
+    }
+}
+
 /// Renders one conversation line in the console style.
 struct ChatBubble: View {
     let item: ChatItem
@@ -857,17 +1009,117 @@ struct ChatBubble: View {
     @State private var viewerImage: IdentifiedImage?
     @State private var expanded = false
 
-    /// Safer markdown: full syntax, but fall back if parser chokes on partial/streamed text.
+    /// Repair smashed markdown (missing newlines before headings / sections)
+    /// so plan cards and long answers don't run into one wall of text.
+    static func structureMarkdown(_ raw: String) -> String {
+        var t = raw.replacingOccurrences(of: "\r\n", with: "\n")
+        // ATX headings glued mid-line: word## Title → word\n\n## Title
+        t = t.replacingOccurrences(
+            of: #"([^\n#])(#{1,6}\s+\S)"#,
+            with: "$1\n\n$2",
+            options: .regularExpression)
+        // Ensure blank line before a heading that only has a single \n
+        t = t.replacingOccurrences(
+            of: #"([^\n])\n(#{1,6}\s)"#,
+            with: "$1\n\n$2",
+            options: .regularExpression)
+        // **Section** glued after text: end**Title** → end\n\n**Title**
+        t = t.replacingOccurrences(
+            of: #"([^\n*])(\*\*[A-Z][^*\n]{1,48}\*\*)"#,
+            with: "$1\n\n$2",
+            options: .regularExpression)
+        // TitleCase section after ) or . without break: playbook)Context → playbook)\n\nContext
+        t = t.replacingOccurrences(
+            of: #"([).])([A-Z][a-zA-Z]{2,24})(?=[A-Z\s]|$)"#,
+            with: "$1\n\n$2",
+            options: .regularExpression)
+        // Label after letter/period: shape.Goal: / textCore model:
+        t = t.replacingOccurrences(
+            of: #"([a-z.])([A-Z][a-z]+(?:\s+[a-zA-Z][a-z]+){0,3}:)"#,
+            with: "$1\n\n$2",
+            options: .regularExpression)
+        // Known section titles glued mid-stream (only when stuck to prior text)
+        let sections = [
+            "Context", "Goal", "Core model", "Rule of thumb", "Prompt pattern",
+            "Example", "Stack", "In scope", "Out of scope", "Verify", "Ship",
+            "Sprint", "Spike", "Build", "Outcome", "Bad vibe", "Good vibe",
+            "Always-approve",
+        ]
+        for label in sections {
+            let escaped = NSRegularExpression.escapedPattern(for: label)
+            // glued: letter/punct immediately before the label (not already spaced)
+            t = t.replacingOccurrences(
+                of: #"(?<=[a-z0-9).])("# + escaped + #")\b"#,
+                with: "\n\n$1",
+                options: [.regularExpression, .caseInsensitive])
+        }
+        // TitleCase glued to TitleCase after a section word: ContextYou → Context\n\nYou
+        t = t.replacingOccurrences(
+            of: #"\b([A-Z][a-z]{2,20})([A-Z][a-z]{2,}\b)"#,
+            with: "$1\n\n$2",
+            options: .regularExpression)
+        // List items glued: text- item → text\n- item
+        t = t.replacingOccurrences(
+            of: #"([^\n])([ \t]*[-*•]\s+\S)"#,
+            with: "$1\n$2",
+            options: .regularExpression)
+        // Numbered lists glued
+        t = t.replacingOccurrences(
+            of: #"([^\n])(\d+\.\s+\S)"#,
+            with: "$1\n$2",
+            options: .regularExpression)
+        // Horizontal rules / em-dashes used as section breaks
+        t = t.replacingOccurrences(
+            of: #"\s*[—–]{2,}\s*"#,
+            with: "\n\n",
+            options: .regularExpression)
+        // Collapse 3+ newlines to 2
+        t = t.replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
+        return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Safer markdown: structure first, full syntax, fall back if parser chokes.
     static func markdown(_ s: String) -> AttributedString {
-        let text = s.isEmpty ? " " : s
+        let text = structureMarkdown(s.isEmpty ? " " : s)
         var opts = AttributedString.MarkdownParsingOptions()
         opts.interpretedSyntax = .full
         if let rich = try? AttributedString(markdown: text, options: opts) {
             return rich
         }
-        // Partial fences / broken ** often fail full parse — try inline only.
         opts.interpretedSyntax = .inlineOnlyPreservingWhitespace
         return (try? AttributedString(markdown: text, options: opts)) ?? AttributedString(text)
+    }
+
+    /// Split structured prose into spaced blocks (headings / paragraphs / lists).
+    static func proseBlocks(_ s: String) -> [String] {
+        let structured = structureMarkdown(s)
+        // Prefer double-newline paragraphs; also split single-line ATX headings.
+        var blocks: [String] = []
+        for para in structured.components(separatedBy: "\n\n") {
+            let p = para.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !p.isEmpty else { continue }
+            // If a block still has multiple lines starting with #, split them
+            let lines = p.components(separatedBy: "\n")
+            if lines.count > 1, lines.contains(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }) {
+                var buf: [String] = []
+                for line in lines {
+                    let tr = line.trimmingCharacters(in: .whitespaces)
+                    if tr.hasPrefix("#") {
+                        if !buf.isEmpty {
+                            blocks.append(buf.joined(separator: "\n"))
+                            buf = []
+                        }
+                        blocks.append(tr)
+                    } else {
+                        buf.append(line)
+                    }
+                }
+                if !buf.isEmpty { blocks.append(buf.joined(separator: "\n")) }
+            } else {
+                blocks.append(p)
+            }
+        }
+        return blocks.isEmpty ? [structured] : blocks
     }
 
     /// Plain preview without markdown artifacts (no ** / # noise in collapsed cards).
@@ -894,6 +1146,7 @@ struct ChatBubble: View {
 
     /// Split on ``` fences and GFM tables so structure survives streaming.
     static func segments(_ s: String) -> [Segment] {
+        let s = structureMarkdown(s)
         var out: [Segment] = []
         var inCode = false
         var language = ""
@@ -1052,7 +1305,7 @@ struct ChatBubble: View {
                 }
 
                 if isOpen {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 12) {
                         if !item.images.isEmpty {
                             ChatImageStrip(images: item.images) { viewerImage = $0 }
                         }
@@ -1064,12 +1317,7 @@ struct ChatBubble: View {
                             case .table:
                                 MarkdownTable(text: seg.text)
                             case .prose:
-                                Text(Self.markdown(seg.text))
-                                    .font(Grok.sans(15))
-                                    .foregroundStyle(Grok.text)
-                                    .lineSpacing(4)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                StructuredProse(text: seg.text, size: 15)
                             }
                         }
                         HStack(spacing: 10) {
@@ -1142,29 +1390,9 @@ struct ChatBubble: View {
                 ImageViewer(image: img)
             }
 
-        case .thought:
-            CollapsibleMeta(
-                title: "THINKING",
-                preview: previewText,
-                defaultExpanded: false
-            ) {
-                Text(item.text)
-                    .font(Grok.mono(12))
-                    .foregroundStyle(Grok.textDim)
-                    .lineSpacing(2)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-        case .tool:
-            CollapsibleMeta(
-                title: "TOOL",
-                preview: item.text,
-                defaultExpanded: false,
-                accent: item.toolStatus == "failed" ? Grok.danger : Grok.textFaint
-            ) {
-                ToolLine(item: item)
-            }
+        case .thought, .tool:
+            // Folded into ThinkingGroupView at the transcript level.
+            EmptyView()
 
         case .permission, .plan:
             EmptyView()   // rendered by PermissionCard / PlanCard in the transcript
@@ -1730,7 +1958,7 @@ struct PlanCard: View {
     let onDecide: (Bool) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
                 Image(systemName: "list.bullet.clipboard.fill").font(.system(size: 13, weight: .semibold))
                 Eyebrow("PLAN", comment: false)
@@ -1738,12 +1966,19 @@ struct PlanCard: View {
             }
             .foregroundStyle(Grok.accent)
 
-            Text(ChatBubble.markdown(item.text))
-                .font(Grok.sans(14))
-                .foregroundStyle(Grok.text)
-                .lineSpacing(3)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // Structured blocks — never one smashed wall of text.
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(ChatBubble.segments(item.text).enumerated()), id: \.offset) { _, seg in
+                    switch seg.kind {
+                    case .code:
+                        CodeBlock(code: seg.text, language: seg.language)
+                    case .table:
+                        MarkdownTable(text: seg.text)
+                    case .prose:
+                        StructuredProse(text: seg.text, size: 14)
+                    }
+                }
+            }
 
             if let decided = item.decided {
                 Text(decided == "approved" ? "✓ Approved — building" : "✗ Kept planning")
@@ -1762,6 +1997,47 @@ struct PlanCard: View {
         .background(Grok.raised)
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Grok.hairlineStrong, lineWidth: 1))
         .clipShape(RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+/// Paragraph / heading aware prose — each block gets real vertical rhythm.
+struct StructuredProse: View {
+    let text: String
+    var size: CGFloat = 15
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(ChatBubble.proseBlocks(text).enumerated()), id: \.offset) { _, block in
+                let trimmed = block.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix("#") {
+                    let level = trimmed.prefix(while: { $0 == "#" }).count
+                    let title = trimmed.drop(while: { $0 == "#" || $0 == " " })
+                    Text(String(title))
+                        .font(Grok.sans(headingSize(level), .semibold))
+                        .foregroundStyle(Grok.text)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, level <= 2 ? 4 : 0)
+                } else {
+                    Text(ChatBubble.markdown(block))
+                        .font(Grok.sans(size))
+                        .foregroundStyle(Grok.text)
+                        .lineSpacing(5)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func headingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return size + 4
+        case 2: return size + 2
+        default: return size + 1
+        }
     }
 }
 
@@ -1921,7 +2197,7 @@ struct MessageFullScreenReader: View {
                 Rectangle().fill(Grok.hairline).frame(height: 1)
 
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 16) {
                         if !item.images.isEmpty {
                             ChatImageStrip(images: item.images) { _ in }
                         }
@@ -1932,12 +2208,7 @@ struct MessageFullScreenReader: View {
                             case .table:
                                 MarkdownTable(text: seg.text)
                             case .prose:
-                                Text(ChatBubble.markdown(seg.text))
-                                    .font(Grok.sans(17))
-                                    .foregroundStyle(Grok.text)
-                                    .lineSpacing(5)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                StructuredProse(text: seg.text, size: 17)
                             }
                         }
                     }
