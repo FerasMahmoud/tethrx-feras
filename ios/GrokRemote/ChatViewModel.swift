@@ -13,6 +13,8 @@ final class ChatViewModel: ObservableObject {
     @Published var usage: SessionUsage?   // live token/context/cost meter
     @Published var commands: [SlashCommand] = []   // grok's slash commands (/compact, skills…)
     @Published var queued: [String] = []           // follow-ups to send when the turn ends
+    /// False until SSE history replay finishes — UI stays blank then opens at bottom.
+    @Published var historyReady = false
 
     // Live per-session settings (mirror the bridge; changed from the chat controls).
     @Published var planMode: Bool
@@ -63,17 +65,27 @@ final class ChatViewModel: ObservableObject {
     /// Open (and auto-reconnect) the event stream for this session.
     func start() {
         guard streamTask == nil else { return }
+        historyReady = false
         streamTask = Task { @MainActor in
             while !Task.isCancelled {
                 live = true
+                // On reconnect after first ready, keep showing transcript.
+                var sawHistoryMarker = false
                 do {
                     for try await event in client.events(sessionId: session.id, lastEventId: lastEventId) {
                         if let id = event["_eventId"] as? Int { lastEventId = max(lastEventId, id) }
+                        if (event["kind"] as? String) == "history_complete" {
+                            sawHistoryMarker = true
+                            historyReady = true
+                            continue
+                        }
                         apply(event)
                     }
                 } catch {
                     // transient — fall through to reconnect
                 }
+                // Empty session / old bridge without marker: still unblock UI.
+                if !sawHistoryMarker { historyReady = true }
                 live = false
                 if Task.isCancelled { break }
                 try? await Task.sleep(nanoseconds: 2_000_000_000)

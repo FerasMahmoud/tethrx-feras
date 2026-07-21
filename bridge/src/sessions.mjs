@@ -168,11 +168,16 @@ class Session {
 
   subscribe(res, lastEventId = 0) {
     // Replay anything the client missed since lastEventId.
+    let replayed = 0;
     for (const { id, event } of this._events) {
       if (id > lastEventId) {
         res.write(`id: ${id}\ndata: ${JSON.stringify(event)}\n\n`);
+        replayed += 1;
       }
     }
+    // Tell the phone history is done so it can jump to the last message once
+    // (avoids paint-at-top then auto-scroll flash).
+    res.write(`data: ${JSON.stringify({ kind: "history_complete", count: replayed, lastEventId: this._nextEventId })}\n\n`);
     this._subscribers.add(res);
     res.on("close", () => this._subscribers.delete(res));
   }

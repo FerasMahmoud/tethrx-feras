@@ -17,6 +17,7 @@ struct ChatView: View {
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var pathHits: [FsEntry] = []
     @State private var pathSearchTask: Task<Void, Never>?
+    @State private var fullReaderItem: ChatItem?
     @FocusState private var composerFocused: Bool
 
     private var name: String { vm.session.displayName }
@@ -116,60 +117,105 @@ struct ChatView: View {
 
     private var transcript: some View {
         GeometryReader { outer in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        ForEach(vm.items) { item in
-                            switch item.role {
-                            case .permission:
-                                PermissionCard(item: item) { optionId, always in
-                                    Task { await vm.decide(item, optionId: optionId, always: always) }
-                                }.id(item.id)
-                            case .plan:
-                                PlanCard(item: item) { approved in
-                                    Task { await vm.decidePlan(item, approved: approved) }
-                                }.id(item.id)
-                            default:
-                                ChatBubble(
-                                    item: item,
-                                    forceExpanded: vm.busy && item.id == vm.items.last(where: { $0.role == .assistant })?.id
-                                ).id(item.id)
-                                    .contextMenu {
-                                        copyButton(item.text)
-                                        if item.role == .assistant || item.role == .user {
-                                            Button {
-                                                UIPasteboard.general.string = item.text
-                                                Haptics.tap()
-                                            } label: {
-                                                Label("Copy full text", systemImage: "doc.on.doc")
+            ZStack {
+                // Hold blank until history is applied + scrolled to bottom (no top→jump flash).
+                if !vm.historyReady {
+                    VStack(spacing: 10) {
+                        ProgressView().tint(Grok.textDim)
+                        Text("loading conversation…")
+                            .font(Grok.mono(11))
+                            .foregroundStyle(Grok.textFaint)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
+                            ForEach(vm.items) { item in
+                                switch item.role {
+                                case .permission:
+                                    PermissionCard(item: item) { optionId, always in
+                                        Task { await vm.decide(item, optionId: optionId, always: always) }
+                                    }.id(item.id)
+                                case .plan:
+                                    PlanCard(item: item) { approved in
+                                        Task { await vm.decidePlan(item, approved: approved) }
+                                    }.id(item.id)
+                                default:
+                                    ChatBubble(
+                                        item: item,
+                                        forceExpanded: vm.busy && item.id == vm.items.last(where: { $0.role == .assistant })?.id,
+                                        onOpenFull: { fullReaderItem = item }
+                                    ).id(item.id)
+                                        .contextMenu {
+                                            copyButton(item.text)
+                                            if item.role == .assistant || item.role == .user {
+                                                Button {
+                                                    fullReaderItem = item
+                                                } label: {
+                                                    Label("Full screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                                                }
+                                                Button {
+                                                    UIPasteboard.general.string = item.text
+                                                    Haptics.tap()
+                                                } label: {
+                                                    Label("Copy full text", systemImage: "doc.on.doc")
+                                                }
                                             }
                                         }
-                                    }
+                                }
                             }
+                            if showTyping { TypingIndicator().id("typing") }
+                            Color.clear.frame(height: 1).id(bottomID)
+                                .background(GeometryReader { g in
+                                    Color.clear.preference(key: BottomOffsetKey.self,
+                                                           value: g.frame(in: .named("transcript")).minY)
+                                })
                         }
-                        if showTyping { TypingIndicator().id("typing") }
-                        Color.clear.frame(height: 1).id(bottomID)
-                            .background(GeometryReader { g in
-                                Color.clear.preference(key: BottomOffsetKey.self,
-                                                       value: g.frame(in: .named("transcript")).minY)
-                            })
+                        .padding(18)
                     }
-                    .padding(18)
+                    .coordinateSpace(name: "transcript")
+                    .defaultScrollAnchor(.bottom)
+                    .scrollIndicators(.hidden)
+                    .scrollDismissesKeyboard(.interactively)
+                    .opacity(vm.historyReady ? 1 : 0)
+                    .onPreferenceChange(BottomOffsetKey.self) { minY in
+                        guard vm.historyReady else { return }
+                        let bottom = minY <= outer.size.height + 80
+                        if bottom != atBottom { atBottom = bottom }
+                    }
+                    .onChange(of: vm.historyReady) { _, ready in
+                        if ready {
+                            // Instant jump — no animation (avoids top→bottom flash).
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                            atBottom = true
+                        }
+                    }
+                    .onChange(of: vm.items.count) { _, _ in
+                        if vm.historyReady && atBottom {
+                            scrollToBottom(proxy, animated: true)
+                        }
+                    }
+                    .onChange(of: lastText) { _, _ in
+                        if vm.historyReady && atBottom {
+                            scrollToBottom(proxy, animated: false)
+                        }
+                    }
+                    .onChange(of: vm.busy) { _, _ in
+                        if vm.historyReady && atBottom {
+                            scrollToBottom(proxy, animated: true)
+                        }
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        if vm.historyReady && !atBottom { jumpButton(proxy) }
+                    }
                 }
-                .coordinateSpace(name: "transcript")
-                .defaultScrollAnchor(.bottom)
-                .scrollIndicators(.hidden)
-                .scrollDismissesKeyboard(.interactively)
-                .onPreferenceChange(BottomOffsetKey.self) { minY in
-                    let bottom = minY <= outer.size.height + 80
-                    if bottom != atBottom { atBottom = bottom }
-                }
-                .onChange(of: vm.items.count) { _, _ in if atBottom { scrollToBottom(proxy) } }
-                .onChange(of: lastText) { _, _ in if atBottom { scrollToBottom(proxy) } }
-                .onChange(of: vm.busy) { _, _ in if atBottom { scrollToBottom(proxy) } }
-                .overlay(alignment: .bottomTrailing) {
-                    if !atBottom { jumpButton(proxy) }
-                }
+            }
+        }
+        .fullScreenCover(item: $fullReaderItem) { item in
+            MessageFullScreenReader(item: item) {
+                fullReaderItem = nil
             }
         }
     }
@@ -766,8 +812,12 @@ struct ChatView: View {
     private var lastText: String { vm.items.last?.text ?? "" }
     private var isEmptyDraft: Bool { draft.trimmingCharacters(in: .whitespaces).isEmpty }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(bottomID, anchor: .bottom) }
+    private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        if animated {
+            withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(bottomID, anchor: .bottom) }
+        } else {
+            proxy.scrollTo(bottomID, anchor: .bottom)
+        }
     }
 }
 
@@ -807,15 +857,35 @@ struct ChatBubble: View {
     let item: ChatItem
     /// While the latest assistant message is still streaming, keep it open.
     var forceExpanded: Bool = false
+    /// Open immersive full-screen reader.
+    var onOpenFull: (() -> Void)? = nil
     @State private var viewerImage: IdentifiedImage?
     @State private var expanded = false
 
-    /// Full markdown (headings, lists, links). Tables handled separately.
+    /// Safer markdown: full syntax, but fall back if parser chokes on partial/streamed text.
     static func markdown(_ s: String) -> AttributedString {
         let text = s.isEmpty ? " " : s
         var opts = AttributedString.MarkdownParsingOptions()
         opts.interpretedSyntax = .full
+        if let rich = try? AttributedString(markdown: text, options: opts) {
+            return rich
+        }
+        // Partial fences / broken ** often fail full parse — try inline only.
+        opts.interpretedSyntax = .inlineOnlyPreservingWhitespace
         return (try? AttributedString(markdown: text, options: opts)) ?? AttributedString(text)
+    }
+
+    /// Plain preview without markdown artifacts (no ** / # noise in collapsed cards).
+    static func plainPreview(_ s: String, limit: Int = 160) -> String {
+        var t = s
+        t = t.replacingOccurrences(of: #"```[\s\S]*?```"#, with: " [code] ", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"!\[[^\]]*\]\([^)]*\)"#, with: " [image] ", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"[*_`#>+-]+"#, with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.count <= limit { return t }
+        return String(t.prefix(limit - 1)) + "…"
     }
 
     /// One run of a message: prose, fenced code, or pipe table.
@@ -908,9 +978,7 @@ struct ChatBubble: View {
     private var previewText: String {
         let t = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
         if t.isEmpty { return item.images.isEmpty ? "…" : "\(item.images.count) image(s)" }
-        let oneLine = t.replacingOccurrences(of: "\n+", with: " ", options: .regularExpression)
-        if oneLine.count <= 160 { return oneLine }
-        return String(oneLine.prefix(157)) + "…"
+        return Self.plainPreview(t, limit: 160)
     }
 
     private var isOpen: Bool { forceExpanded || expanded }
@@ -942,36 +1010,51 @@ struct ChatBubble: View {
         case .assistant:
             VStack(alignment: .leading, spacing: 0) {
                 // Header row — always visible; tap toggles expand
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() }
-                    Haptics.tap()
-                } label: {
-                    HStack(spacing: 8) {
-                        Eyebrow("GROK")
-                        if forceExpanded {
-                            Text("LIVE")
-                                .font(Grok.mono(8, .bold))
-                                .foregroundStyle(Grok.bg)
-                                .padding(.horizontal, 5).padding(.vertical, 2)
-                                .background(Grok.accent)
-                                .clipShape(Capsule())
-                        }
-                        if !item.images.isEmpty {
-                            Image(systemName: "photo")
-                                .font(.system(size: 10, weight: .semibold))
+                HStack(spacing: 8) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) { expanded.toggle() }
+                        Haptics.tap()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Eyebrow("GROK")
+                            if forceExpanded {
+                                Text("LIVE")
+                                    .font(Grok.mono(8, .bold))
+                                    .foregroundStyle(Grok.bg)
+                                    .padding(.horizontal, 5).padding(.vertical, 2)
+                                    .background(Grok.accent)
+                                    .clipShape(Capsule())
+                            }
+                            if !item.images.isEmpty {
+                                Image(systemName: "photo")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(Grok.textFaint)
+                            }
+                            Spacer(minLength: 4)
+                            Image(systemName: isOpen ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 11, weight: .semibold))
                                 .foregroundStyle(Grok.textFaint)
+                                .frame(width: 28, height: 28)
                         }
-                        Spacer(minLength: 4)
-                        Image(systemName: isOpen ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isOpen ? "Collapse answer" : "Expand answer")
+
+                    // Full-screen reader (immersive)
+                    Button {
+                        onOpenFull?()
+                        Haptics.tap()
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(Grok.textFaint)
-                            .frame(width: 28, height: 28)
+                            .frame(width: 32, height: 32)
                             .contentShape(Rectangle())
                     }
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Full screen")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isOpen ? "Collapse answer" : "Expand answer")
 
                 if isOpen {
                     VStack(alignment: .leading, spacing: 10) {
@@ -994,13 +1077,32 @@ struct ChatBubble: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
-                        if !forceExpanded {
-                            collapseToggle
+                        HStack(spacing: 10) {
+                            if !forceExpanded { collapseToggle }
+                            Spacer(minLength: 0)
+                            Button {
+                                UIPasteboard.general.string = item.text
+                                Haptics.tap()
+                            } label: {
+                                Label("Copy", systemImage: "doc.on.doc")
+                                    .font(Grok.mono(11, .medium))
+                                    .foregroundStyle(Grok.textFaint)
+                            }
+                            .buttonStyle(.plain)
+                            Button {
+                                onOpenFull?()
+                                Haptics.tap()
+                            } label: {
+                                Label("Full", systemImage: "arrow.up.left.and.arrow.down.right")
+                                    .font(Grok.mono(11, .medium))
+                                    .foregroundStyle(Grok.textFaint)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                     .padding(.top, 10)
                 } else {
-                    // Collapsed preview — clean scan mode
+                    // Collapsed preview — plain text, no markdown junk
                     VStack(alignment: .leading, spacing: 8) {
                         if !item.images.isEmpty {
                             ChatImageStrip(images: Array(item.images.prefix(1))) { viewerImage = $0 }
@@ -1010,10 +1112,13 @@ struct ChatBubble: View {
                             .foregroundStyle(Grok.textDim)
                             .lineLimit(3)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        HStack(spacing: 6) {
-                            Text("Tap to expand")
+                        HStack(spacing: 8) {
+                            Text("Expand")
                                 .font(Grok.mono(10, .medium))
                                 .foregroundStyle(Grok.accent)
+                            Text("· Full screen")
+                                .font(Grok.mono(10, .medium))
+                                .foregroundStyle(Grok.textFaint)
                             if item.text.count > 100 {
                                 Text("· \(item.text.count) chars")
                                     .font(Grok.mono(10))
@@ -1025,6 +1130,10 @@ struct ChatBubble: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.18)) { expanded = true }
+                        Haptics.tap()
+                    }
+                    .onLongPressGesture {
+                        onOpenFull?()
                         Haptics.tap()
                     }
                 }
@@ -1677,6 +1786,93 @@ struct ImageViewer: View {
                 Spacer()
             }
         }
+    }
+}
+
+// MARK: - Full-screen message reader (immersive)
+
+/// Full-phone reader: select text, one-tap copy, one-tap close.
+struct MessageFullScreenReader: View {
+    let item: ChatItem
+    var onClose: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        ZStack {
+            Grok.bg.ignoresSafeArea()
+            VStack(spacing: 0) {
+                // Top bar
+                HStack(spacing: 12) {
+                    Text(item.role == .user ? "YOU" : "GROK")
+                        .font(Grok.mono(12, .bold))
+                        .tracking(1)
+                        .foregroundStyle(Grok.textDim)
+                    Spacer()
+                    Button {
+                        UIPasteboard.general.string = item.text
+                        copied = true
+                        Haptics.tap()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            Text(copied ? "Copied" : "Copy")
+                        }
+                        .font(Grok.mono(12, .semibold))
+                        .foregroundStyle(Grok.text)
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(Grok.raised)
+                        .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    Button {
+                        onClose()
+                        Haptics.tap()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Grok.text)
+                            .frame(width: 36, height: 36)
+                            .background(Grok.raised, in: Circle())
+                            .overlay(Circle().stroke(Grok.hairlineStrong, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Close full view")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+
+                Rectangle().fill(Grok.hairline).frame(height: 1)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if !item.images.isEmpty {
+                            ChatImageStrip(images: item.images) { _ in }
+                        }
+                        ForEach(Array(ChatBubble.segments(item.text).enumerated()), id: \.offset) { _, seg in
+                            switch seg.kind {
+                            case .code:
+                                CodeBlock(code: seg.text, language: seg.language)
+                            case .table:
+                                MarkdownTable(text: seg.text)
+                            case .prose:
+                                Text(ChatBubble.markdown(seg.text))
+                                    .font(Grok.sans(17))
+                                    .foregroundStyle(Grok.text)
+                                    .lineSpacing(5)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                    .padding(20)
+                    .padding(.bottom, 40)
+                }
+            }
+        }
+        // Swipe down / tap outside not needed — explicit close is one tap.
+        .statusBarHidden(false)
     }
 }
 

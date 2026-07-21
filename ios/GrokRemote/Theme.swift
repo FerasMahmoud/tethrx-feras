@@ -38,9 +38,10 @@ struct Eyebrow: View {
     var comment: Bool = true
     init(_ text: String, comment: Bool = true) { self.text = text; self.comment = comment }
     var body: some View {
+        // Tight tracking — wide tracking made short labels look like typos (e.g. "GROoK").
         Text((comment ? "// " : "") + text.uppercased())
             .font(Grok.mono(11, .medium))
-            .tracking(1.4)
+            .tracking(0.6)
             .foregroundStyle(Grok.textDim)
     }
 }
