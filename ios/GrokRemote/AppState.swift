@@ -13,6 +13,12 @@ enum FerasDefaults {
 /// and default working directory to UserDefaults so pairing survives relaunches.
 @MainActor
 final class AppState: ObservableObject {
+    /// Bridge version this app's features expect. Older → visible update banner.
+    static let wantedBridgeVersion = "0.1.15"
+    var bridgeNeedsUpdate: Bool {
+        connected && Semver.isOlder(health?.version, than: Self.wantedBridgeVersion)
+    }
+
     @Published var baseURLString: String { didSet { store("bridge.baseURL", baseURLString) } }
     @Published var token: String { didSet { Keychain.save(token) } }
     @Published var defaultCwd: String { didSet { store("bridge.cwd", defaultCwd) } }

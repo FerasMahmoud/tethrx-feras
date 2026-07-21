@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Lists the bridge's Grok sessions and starts new ones. Tapping opens live chat.
 struct SessionListView: View {
@@ -13,23 +14,26 @@ struct SessionListView: View {
     @State private var folderText = ""
     @State private var collapsed: Set<String> = []
     @State private var query = ""
+    @State private var contentHits: [SearchResult] = []
     /// main | running | subagents — subagents never mix into the default list.
     @State private var sessionFilter: SessionFilter = .main
     @State private var showSettings = false
+    @State private var creatingFolder = false
+    @State private var newFolderName = ""
+    @State private var showFsBrowser = false
 
     private enum SessionFilter: String, CaseIterable {
         case main, running, subagents
     }
-    @State private var creatingFolder = false
-    @State private var newFolderName = ""
-    @State private var showFsBrowser = false
 
     var body: some View {
         NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     header
+                    if app.bridgeNeedsUpdate { updateBanner }
                     workingDir
+                    runningNow
                     sessions
                     grokCliSection
                 }
@@ -103,6 +107,81 @@ struct SessionListView: View {
                 if let s = await app.newSession() { path.append(s) }
             }
         }
+        // Debounced full-text search over conversation history (bridge-side).
+        .task(id: query) {
+            let q = query.trimmingCharacters(in: .whitespaces)
+            guard q.count >= 3, let client = app.client else { contentHits = []; return }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            contentHits = (try? await client.search(q)) ?? []
+        }
+    }
+
+    // MARK: Running now
+
+    @ViewBuilder private var runningNow: some View {
+        let running = app.sessions.filter { $0.isRunning && !$0.isSubagentSession }
+        if !running.isEmpty, sessionFilter != .subagents {
+            VStack(alignment: .leading, spacing: 10) {
+                Eyebrow("RUNNING NOW")
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(running) { session in
+                            Button {
+                                if !path.contains(session) { path.append(session) }
+                            } label: {
+                                HStack(spacing: 7) {
+                                    Circle().fill(Grok.accent).frame(width: 6, height: 6)
+                                    Text(session.displayName).font(Grok.mono(12, .medium)).lineLimit(1)
+                                }
+                                .foregroundStyle(Grok.text)
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
+                                .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Bridge update banner
+
+    private var updateBanner: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12)).foregroundStyle(Grok.text)
+                Text("Your bridge needs an update").font(Grok.sans(15, .semibold)).foregroundStyle(Grok.text)
+            }
+            Text("This app needs bridge \(AppState.wantedBridgeVersion) or newer (you have \(app.health?.version ?? "unknown")). On the computer, run:")
+                .font(Grok.mono(11)).foregroundStyle(Grok.textDim).lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Text("cd ~/tethrx-feras/bridge && npm i -g .")
+                    .font(Grok.mono(11)).foregroundStyle(Grok.text)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                Spacer(minLength: 0)
+                Button {
+                    UIPasteboard.general.string = "cd ~/tethrx-feras/bridge && npm i -g . && systemctl --user restart tethrx-bridge"
+                    Haptics.tap()
+                } label: {
+                    Image(systemName: "doc.on.doc").font(.system(size: 11, weight: .medium)).foregroundStyle(Grok.textDim)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(Grok.bg)
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Grok.hairline, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            Text("Then reconnect. Chat still works; newest features need the update.")
+                .font(Grok.mono(10)).foregroundStyle(Grok.textFaint).lineSpacing(2)
+        }
+        .padding(14)
+        .background(Grok.raised)
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Grok.hairlineStrong, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 
     /// Open the session a notification (or debug launch argument) pointed at.
@@ -268,6 +347,41 @@ struct SessionListView: View {
                         }
                     }
                     if hasFolders { Color.clear.frame(height: 8) }
+                }
+                contentSearchResults
+            }
+        }
+    }
+
+    /// Sessions whose CONVERSATION matched the query (beyond title/folder/path).
+    @ViewBuilder private var contentSearchResults: some View {
+        let titleMatches = Set(filteredSessions.map { $0.id })
+        let extras = contentHits.filter { !titleMatches.contains($0.sessionId) }
+        if !query.trimmingCharacters(in: .whitespaces).isEmpty, !extras.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Eyebrow("FOUND IN CONVERSATIONS")
+                    .padding(.top, 18).padding(.bottom, 10)
+                ForEach(extras) { hit in
+                    if let session = app.sessions.first(where: { $0.id == hit.sessionId }) {
+                        Button {
+                            if !path.contains(session) { path.append(session) }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(session.displayName)
+                                    .font(Grok.sans(15, .semibold)).foregroundStyle(Grok.text).lineLimit(1)
+                                if let snippet = hit.hits.first?.snippet {
+                                    Text("…\(snippet)…")
+                                        .font(Grok.mono(11)).foregroundStyle(Grok.textDim)
+                                        .lineLimit(2)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 12)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Rectangle().fill(Grok.hairline).frame(height: 1)
+                    }
                 }
             }
         }

@@ -26,7 +26,7 @@ function normalizeUsage(u) {
 }
 
 class Session {
-  constructor({ id, cwd, model, title, transport, effort, createdAt, turnCount, grokSessionId, planMode, autoApprove, usage, folder, activityPushToken, sessionKind, agentName }) {
+  constructor({ id, cwd, model, title, transport, effort, createdAt, turnCount, grokSessionId, planMode, autoApprove, usage, folder, activityPushToken, sessionKind, agentName, seedContext }) {
     this.id = id || randomUUID();        // valid v4 UUID — required by `grok -s`
     this.cwd = cwd;
     this.model = model;
@@ -41,6 +41,7 @@ class Session {
     // "main" | "subagent" — subagents stay out of the phone's default session list.
     this.sessionKind = sessionKind || "main";
     this.agentName = agentName || "";
+    this.seedContext = seedContext || null;   // handoff summary from compact; consumed on first turn
     this.createdAt = createdAt || new Date().toISOString();
     this.updatedAt = createdAt || this.createdAt;
     this.status = "idle";                // "idle" | "running"
@@ -108,6 +109,7 @@ class Session {
       activityPushToken: this.activityPushToken || null,
       sessionKind: this.sessionKind || "main",
       agentName: this.agentName || "",
+      seedContext: this.seedContext || null,
       createdAt: this.createdAt, turnCount: this.turnCount, usage: this.usage,
     };
   }

@@ -766,6 +766,10 @@ struct ChatView: View {
                     let on = argument.lowercased() != "off"
                     Task { await vm.setConfig(autoApprove: on) }
                     return
+                case .compact:
+                    draft = ""
+                    showDetails = true   // compact button lives in session details
+                    return
                 case .unsupported:
                     vm.errorMessage = "Grok only runs /\(name) inside its own terminal, so it does nothing from here."
                     return
@@ -1473,11 +1477,16 @@ struct PermissionCard: View {
 /// breakdown (incl. thinking), cost, and the session's configuration.
 struct SessionDetailsSheet: View {
     @ObservedObject var vm: ChatViewModel
+    @EnvironmentObject var app: AppState
     @Environment(\.dismiss) private var dismiss
 
     @State private var ciRuns: [CiRun] = []
     @State private var ciLoading = false
     @State private var showGit = false
+    @State private var showFiles = false
+    @State private var confirmCompact = false
+    @State private var compacting = false
+    @State private var compactError: String?
 
     private var u: SessionUsage { vm.usage ?? SessionUsage() }
     private var session: SessionInfo { vm.session }
@@ -1490,27 +1499,7 @@ struct SessionDetailsSheet: View {
                     tokens
                     if !ciRuns.isEmpty || ciLoading { ciSection }
                     technical
-                    // Git review lives here (toolbar branch icon removed).
-                    Button {
-                        showGit = true
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.triangle.branch")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text("Review changes")
-                                .font(Grok.mono(13, .semibold))
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(Grok.textFaint)
-                        }
-                        .foregroundStyle(Grok.text)
-                        .padding(14)
-                        .background(Grok.raised)
-                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Grok.hairline, lineWidth: 1))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    }
-                    .buttonStyle(.plain)
+                    actions
                 }
                 .padding(20)
             }
@@ -1526,6 +1515,15 @@ struct SessionDetailsSheet: View {
             }
             .sheet(isPresented: $showGit) {
                 GitReviewSheet(client: vm.client, session: vm.session)
+            }
+            .sheet(isPresented: $showFiles) {
+                FileBrowserSheet(client: vm.client, session: vm.session)
+            }
+            .alert("Compact this session?", isPresented: $confirmCompact) {
+                Button("Compact") { Task { await compact() } }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Grok will summarize the conversation (uses some tokens), then a new session opens seeded with that summary.")
             }
         }
         .preferredColorScheme(.dark)
@@ -1548,6 +1546,67 @@ struct SessionDetailsSheet: View {
                 Text("Send a message to see context usage.")
                     .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
             }
+
+            if session.turnCount > 0, !vm.busy {
+                Button { confirmCompact = true } label: {
+                    HStack(spacing: 10) {
+                        if compacting { ProgressView().controlSize(.small).tint(.white) }
+                        Label(compacting ? "Compacting…" : "Compact into a fresh session",
+                              systemImage: "arrow.triangle.2.circlepath")
+                    }
+                }
+                .buttonStyle(PillButton(kind: u.contextFraction > 0.85 ? .prominent : .subtle))
+                .disabled(compacting)
+                Text("Grok writes a handoff summary; a fresh session starts from it. This one stays untouched.")
+                    .font(Grok.mono(10)).foregroundStyle(Grok.textFaint).lineSpacing(2)
+                if let compactError {
+                    Text(compactError).font(Grok.mono(11)).foregroundStyle(Grok.danger)
+                }
+            }
+        }
+    }
+
+    private var actions: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Eyebrow("ACTIONS")
+            actionRow(title: "Browse project files", icon: "folder") { showFiles = true }
+            actionRow(title: "Review changes", icon: "arrow.triangle.branch") { showGit = true }
+        }
+    }
+
+    private func actionRow(title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(title)
+                    .font(Grok.mono(13, .semibold))
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Grok.textFaint)
+            }
+            .foregroundStyle(Grok.text)
+            .padding(14)
+            .background(Grok.raised)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Grok.hairline, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func compact() async {
+        compacting = true
+        compactError = nil
+        defer { compacting = false }
+        do {
+            let fresh = try await vm.client.compact(sessionId: session.id)
+            Haptics.success()
+            await app.reloadSessions()
+            dismiss()
+            app.pendingOpenSessionId = fresh.id
+        } catch {
+            compactError = "Compaction failed — check the connection and try again."
         }
     }
 

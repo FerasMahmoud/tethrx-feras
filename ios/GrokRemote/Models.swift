@@ -7,6 +7,89 @@ struct HealthInfo: Codable {
     let host: String?          // the computer's hostname — used to name a paired bridge
     let grok: String?
     let grokAvailable: Bool
+    var version: String?       // bridge package version
+    var latestVersion: String? // newest on npm (nil offline)
+}
+
+/// Tiny numeric semver comparison. nil counts as older — bridges before 0.1.12
+/// didn't report a version at all.
+enum Semver {
+    static func isOlder(_ a: String?, than b: String) -> Bool {
+        guard let a, !a.isEmpty else { return true }
+        let x = a.split(separator: ".").compactMap { Int($0) }
+        let y = b.split(separator: ".").compactMap { Int($0) }
+        guard !x.isEmpty, !y.isEmpty else { return false }
+        let n = max(x.count, y.count)
+        for i in 0..<n {
+            let xi = i < x.count ? x[i] : 0
+            let yi = i < y.count ? y[i] : 0
+            if xi != yi { return xi < yi }
+        }
+        return false
+    }
+}
+
+/// One session matched by full-text search, with a few snippets.
+struct SearchResult: Codable, Identifiable {
+    struct Hit: Codable, Hashable {
+        var eventId: Int
+        var kind: String
+        var snippet: String
+    }
+    var sessionId: String
+    var title: String
+    var count: Int
+    var hits: [Hit]
+    var id: String { sessionId }
+}
+
+/// One entry of a working-directory picker listing.
+struct DirListing: Codable {
+    struct Dir: Codable, Identifiable, Hashable {
+        var name: String
+        var path: String
+        var id: String { path }
+    }
+    var path: String
+    var parent: String?
+    var dirs: [Dir]
+}
+
+/// One entry of a session's project tree (`GET /api/sessions/:id/files`).
+struct FileEntry: Codable, Identifiable, Hashable {
+    var name: String
+    var dir: Bool
+    var size: Int
+    var id: String { name }
+}
+
+/// `GET /api/sessions/:id/file` — a text file's content (or a binary marker).
+struct FileContent: Codable {
+    var path: String
+    var size: Int
+    var binary: Bool
+    var truncated: Bool?
+    var content: String?
+}
+
+/// A bridge-side scheduled task, tied to a session; fires on the computer's clock.
+struct BridgeSchedule: Codable, Identifiable, Hashable {
+    var id: String
+    var sessionId: String
+    var prompt: String
+    var hour: Int
+    var minute: Int
+    var weekdays: [Int]      // 0=Sunday … 6=Saturday; empty = every day
+    var enabled: Bool
+
+    var timeLabel: String { String(format: "%02d:%02d", hour, minute) }
+    var daysLabel: String {
+        if weekdays.isEmpty { return "Every day" }
+        if weekdays.sorted() == [1, 2, 3, 4, 5] { return "Weekdays" }
+        if weekdays.sorted() == [0, 6] { return "Weekends" }
+        let symbols = Calendar.current.shortWeekdaySymbols
+        return weekdays.sorted().compactMap { symbols.indices.contains($0) ? symbols[$0] : nil }.joined(separator: " ")
+    }
 }
 
 /// A paired computer. Its pairing token lives in the Keychain, keyed by `id`,
@@ -201,7 +284,8 @@ struct SlashCommand: Codable, Identifiable, Hashable {
         case send            // a skill — grok runs it
         case openDetails     // /context, /session-info — the app already shows this
         case autoApprove     // /always-approve — the app has a real toggle
-        case unsupported     // /compact, /goal, /loop, /feedback — inert over ACP
+        case compact         // bridge-side real compaction (not ACP /compact)
+        case unsupported     // /goal, /loop, /feedback — inert over ACP
     }
 
     var action: Action {
@@ -209,6 +293,7 @@ struct SlashCommand: Codable, Identifiable, Hashable {
         switch name {
         case "context", "session-info": return .openDetails
         case "always-approve":          return .autoApprove
+        case "compact":                 return .compact
         default:                        return .unsupported
         }
     }

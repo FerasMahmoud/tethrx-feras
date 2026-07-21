@@ -232,6 +232,118 @@ struct BridgeClient {
         try Self.check(resp)
     }
 
+    // MARK: Compact / search / logs / schedules / project files
+
+    /// Compact a session: summary turn + fresh session with seedContext. Long timeout.
+    func compact(sessionId: String) async throws -> SessionInfo {
+        var req = try request("/api/sessions/\(sessionId)/compact", method: "POST", json: [:])
+        req.timeoutInterval = 300
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        return try JSONDecoder().decode(SessionInfo.self, from: data)
+    }
+
+    /// Full-text search across every session's conversation history.
+    func search(_ query: String) async throws -> [SearchResult] {
+        guard var comps = URLComponents(url: try url("/api/search"), resolvingAgainstBaseURL: false) else {
+            throw BridgeError.badURL
+        }
+        comps.queryItems = [URLQueryItem(name: "q", value: query)]
+        guard let u = comps.url else { throw BridgeError.badURL }
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 20
+        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        struct Wrapper: Codable { let results: [SearchResult] }
+        return try JSONDecoder().decode(Wrapper.self, from: data).results
+    }
+
+    /// Bridge console ring buffer.
+    func logs() async throws -> [String] {
+        let (data, resp) = try await session.data(for: try request("/api/logs"))
+        try Self.check(resp)
+        struct Wrapper: Codable { let lines: [String] }
+        return try JSONDecoder().decode(Wrapper.self, from: data).lines
+    }
+
+    func listSchedules() async throws -> [BridgeSchedule] {
+        let (data, resp) = try await session.data(for: try request("/api/schedules"))
+        try Self.check(resp)
+        struct Wrapper: Codable { let schedules: [BridgeSchedule] }
+        return try JSONDecoder().decode(Wrapper.self, from: data).schedules
+    }
+
+    @discardableResult
+    func createSchedule(sessionId: String, prompt: String, hour: Int, minute: Int, weekdays: [Int]) async throws -> BridgeSchedule {
+        let (data, resp) = try await session.data(
+            for: try request("/api/schedules", method: "POST",
+                             json: ["sessionId": sessionId, "prompt": prompt,
+                                    "hour": hour, "minute": minute, "weekdays": weekdays]))
+        try Self.check(resp)
+        return try JSONDecoder().decode(BridgeSchedule.self, from: data)
+    }
+
+    func setScheduleEnabled(_ id: String, enabled: Bool) async throws {
+        let (_, resp) = try await session.data(
+            for: try request("/api/schedules/\(id)", method: "PATCH", json: ["enabled": enabled]))
+        try Self.check(resp)
+    }
+
+    func deleteSchedule(_ id: String) async throws {
+        let (_, resp) = try await session.data(for: try request("/api/schedules/\(id)", method: "DELETE"))
+        try Self.check(resp)
+    }
+
+    /// Working-dir picker — maps jailed `/api/fs` into DirListing shape.
+    func listDirs(path: String?) async throws -> DirListing {
+        let listing = try await listFs(path: path ?? "")
+        let dirs = listing.entries.filter(\.isDir).map { e -> DirListing.Dir in
+            let child = listing.path.hasSuffix("/")
+                ? listing.path + e.name
+                : listing.path + "/" + e.name
+            return DirListing.Dir(name: e.name, path: e.path ?? child)
+        }
+        let parent: String? = {
+            let p = listing.path
+            if p.isEmpty || p == "/" { return nil }
+            let up = (p as NSString).deletingLastPathComponent
+            return up.isEmpty ? "/" : up
+        }()
+        return DirListing(path: listing.path, parent: parent, dirs: dirs)
+    }
+
+    /// List one folder of the session's project (path relative to its cwd).
+    func listFiles(sessionId: String, path: String) async throws -> [FileEntry] {
+        guard var comps = URLComponents(url: try url("/api/sessions/\(sessionId)/files"), resolvingAgainstBaseURL: false) else {
+            throw BridgeError.badURL
+        }
+        comps.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let u = comps.url else { throw BridgeError.badURL }
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 15
+        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        struct Wrapper: Codable { let entries: [FileEntry] }
+        return try JSONDecoder().decode(Wrapper.self, from: data).entries
+    }
+
+    /// Fetch a text file's content from the session's project.
+    func fileContent(sessionId: String, path: String) async throws -> FileContent {
+        guard var comps = URLComponents(url: try url("/api/sessions/\(sessionId)/file"), resolvingAgainstBaseURL: false) else {
+            throw BridgeError.badURL
+        }
+        comps.queryItems = [URLQueryItem(name: "path", value: path)]
+        guard let u = comps.url else { throw BridgeError.badURL }
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 20
+        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        return try JSONDecoder().decode(FileContent.self, from: data)
+    }
+
     // MARK: Filesystem browse + cwd recents
 
     /// List a directory on the host (`GET /api/fs?path=`). Empty path → bridge default cwd.

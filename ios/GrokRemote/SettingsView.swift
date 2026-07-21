@@ -9,6 +9,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var revealToken = false
     @State private var addingComputer = false
+    @State private var showingLog = false
     @State private var report: UsageReport?
     @State private var loadingUsage = false
     @State private var newSnippet = ""
@@ -20,6 +21,7 @@ struct SettingsView: View {
                     computers
                     usage
                     defaults
+                    SchedulesSection()
                     notifications
                     security
                     snippetsSection
@@ -64,9 +66,27 @@ struct SettingsView: View {
                     Image(systemName: revealToken ? "eye.slash" : "eye").font(.caption)
                 }.foregroundStyle(Grok.textDim)
             }
+            if let v = app.health?.version, !v.isEmpty {
+                row("Bridge version", "v\(v)")
+            }
+            if let latest = app.health?.latestVersion, let cur = app.health?.version,
+               Semver.isOlder(cur, than: latest) {
+                Text("Update available: v\(latest) — npm i -g tethrx-bridge (or reinstall from ~/tethrx-feras/bridge)")
+                    .font(Grok.mono(10)).foregroundStyle(Grok.textFaint).lineSpacing(2)
+            }
+            if app.client != nil {
+                Button { showingLog = true } label: {
+                    Label("View bridge log", systemImage: "text.alignleft")
+                }
+                .buttonStyle(PillButton(kind: .subtle))
+                .padding(.top, 4)
+            }
             Button { dismiss(); app.disconnect() } label: { Text("Disconnect").frame(maxWidth: .infinity) }
                 .buttonStyle(PillButton(kind: .subtle))
                 .padding(.top, 4)
+        }
+        .sheet(isPresented: $showingLog) {
+            if let client = app.client { BridgeLogSheet(client: client) }
         }
     }
 

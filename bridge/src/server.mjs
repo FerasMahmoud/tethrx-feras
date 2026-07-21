@@ -22,7 +22,7 @@
 
 import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
+import { readFile, writeFile, mkdir, chmod, readdir, stat } from "node:fs/promises";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, normalize as normPath, sep, basename, resolve as resolvePath } from "node:path";
@@ -36,14 +36,51 @@ import { ensureAskGrokHome, AcpSession } from "./acp.mjs";
 import { loadApns } from "./apns.mjs";
 import { listGrokSessions } from "./grok-sessions.mjs";
 import { seedSessionFromCli } from "./import-cli-history.mjs";
+import { ScheduleStore, startScheduler } from "./schedules.mjs";
 import * as awake from "./awake.mjs";
 import * as git from "./git.mjs";
 import { listDir, searchPaths, readFileBase64 } from "./fs.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, "..", "public");
+
+// Tee console into a ring buffer for GET /api/logs (phone debug).
+const LOG_LIMIT = 500;
+const logBuffer = [];
+for (const level of ["log", "warn", "error"]) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    original(...args);
+    try {
+      const line = args
+        .map((a) => (typeof a === "string" ? a : String(a?.stack || a?.message || JSON.stringify(a))))
+        .join(" ");
+      logBuffer.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
+      if (logBuffer.length > LOG_LIMIT) logBuffer.shift();
+    } catch { /* logging must never throw */ }
+  };
+}
+
 const store = new SessionStore(join(config.stateDir, "sessions.json"));
 const apns = loadApns(config);   // native push (disabled unless an APNs key is configured)
+const schedules = new ScheduleStore(join(config.stateDir, "schedules.json"));
+
+// Bridge version + daily npm check (for "update available" / too-old banner).
+const OWN_VERSION = (() => {
+  try { return JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")).version || ""; }
+  catch { return ""; }
+})();
+let npmLatest = { version: null, at: 0 };
+function latestNpmVersion() {
+  if (Date.now() - npmLatest.at > 24 * 3600_000) {
+    npmLatest.at = Date.now();
+    fetch("https://registry.npmjs.org/tethrx-bridge/latest", { signal: AbortSignal.timeout(5000) })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d?.version) npmLatest.version = d.version; })
+      .catch(() => { /* offline is fine */ });
+  }
+  return npmLatest.version;
+}
 
 // Single-use, decision-bound tokens for lock-screen approval links, so the full
 // pairing token is never embedded in a push notification.
@@ -144,9 +181,12 @@ if (D.loopbackOnly) {
   host.innerHTML =
     '<div class="card warn">' +
     '<div class="eyebrow">One more step</div>' +
-    '<p style="margin:10px 0 4px;line-height:1.5">This bridge is only listening on this computer, so your phone can\'t reach it yet. Stop it with Ctrl+C and start it again like this:</p>' +
+    // NOTE: inside a server-side template literal, lone \\' collapses to a raw
+    // apostrophe and SyntaxError-kills the whole inline script (no token/QR).
+    // Avoid apostrophes or double-escape (\\\\').
+    '<p style="margin:10px 0 4px;line-height:1.5">This bridge is only listening on this computer, so your phone cannot reach it yet. Stop it with Ctrl+C and start it again like this:</p>' +
     '<div class="tokrow"><code>GROK_REMOTE_HOST=0.0.0.0 npx tethrx-bridge</code>' +
-    '<button onclick="navigator.clipboard.writeText(\'GROK_REMOTE_HOST=0.0.0.0 npx tethrx-bridge\')">Copy</button></div>' +
+    '<button onclick="navigator.clipboard.writeText(\\'GROK_REMOTE_HOST=0.0.0.0 npx tethrx-bridge\\')">Copy</button></div>' +
     '<p class="dim" style="margin:12px 0 0;font-size:12px">Then reload this page and the QR codes will appear. Only do this on a network you trust: the token is what protects the bridge.</p>' +
     '</div>';
 } else if (!D.addrs.length) {
@@ -391,6 +431,10 @@ function startHeadlessTurn(session, body) {
     })
     .catch((err) => {
       session.emit({ kind: "error", message: friendlyTurnError(err) });
+      pushNotify(session, {
+        title: displayTitle(session),
+        message: `Turn failed: ${friendlyTurnError(err)}`.slice(0, 170),
+      });
     })
     .finally(() => { awake.release(); session.endTurn(); store.save(); session.saveHistory(); });
 }
@@ -445,8 +489,27 @@ async function ensureAcp(session) {
 }
 
 function startAcpTurn(session, body) {
+  // Compacted sessions carry a predecessor summary; prepend once on first turn.
+  if (session.seedContext) {
+    body.displayText = body.displayText ?? body.text;
+    const seed = session.seedContext;
+    session.seedContext = null;
+    store.save();
+    const handoff = `[Handoff from a previous session — treat this as prior context]\n${seed}\n[End of handoff]\n\n`;
+    if (Array.isArray(body.promptBlocks)) {
+      const first = body.promptBlocks.find((b) => b?.type === "text");
+      if (first) first.text = handoff + (first.text || "");
+      else body.promptBlocks.unshift({ type: "text", text: handoff + (body.text || "") });
+    }
+    body.text = handoff + (body.text || "");
+  }
   session.beginTurn();
-  session.emit({ kind: "turn_start", text: body.text, at: new Date().toISOString() });
+  session.emit({
+    kind: "turn_start",
+    text: body.displayText ?? body.text,
+    imageCount: body.imageCount || 0,
+    at: new Date().toISOString(),
+  });
   awake.acquire();   // don't let the machine sleep out from under a running turn
   apns.sendLiveActivity(session, { phase: "working", detail: "Grok is working…", event: "update" }).catch(() => {});
 
@@ -472,6 +535,11 @@ function startAcpTurn(session, body) {
       apns.sendLiveActivity(session, { phase: "done", detail: "Finished", event: "end" }).catch(() => {});
     } catch (err) {
       session.emit({ kind: "error", message: friendlyTurnError(err) });
+      // Failures push too — scheduled/background deaths must not look like silence.
+      pushNotify(session, {
+        title: displayTitle(session),
+        message: `Turn failed: ${friendlyTurnError(err)}`.slice(0, 170),
+      });
       apns.sendLiveActivity(session, { phase: "error", detail: "Something went wrong", event: "end" }).catch(() => {});
       try { session.acp?.stop(); } catch { /* ignore */ }   // don't orphan the child
       session.acp = null; // force a fresh process on the next turn
@@ -498,6 +566,25 @@ function startAcpTurn(session, body) {
     }
   })();
 }
+
+// Fire due schedules on this machine's local clock.
+startScheduler({
+  schedules,
+  sessions: store,
+  fire: (session, s) => {
+    pushNotify(session, {
+      title: displayTitle(session),
+      message: `Scheduled task started: ${s.prompt.slice(0, 90)}`,
+    });
+    startTurn(session, { text: s.prompt });
+  },
+  onSkip: (session, s, why) => {
+    pushNotify(session, {
+      title: displayTitle(session),
+      message: `Scheduled task skipped — ${why}.`,
+    });
+  },
+});
 
 // Reap idle ACP processes; the next turn transparently resumes context via session/load.
 if (config.transport === "acp") {
@@ -530,6 +617,8 @@ async function handle(req, res) {
       host: hostname(),          // lets the phone name this computer in its bridge list
       grok: version,
       grokAvailable: Boolean(version),
+      version: OWN_VERSION,
+      latestVersion: latestNpmVersion(),
     });
   }
 
@@ -542,7 +631,10 @@ async function handle(req, res) {
     // too, so a hostile page (or a rebound DNS name) would otherwise be able to read
     // the token straight out of this page.
     if (!isDirectLocalRequest(req)) {
-      return send(res, 403, "Open this page directly in a browser on this computer.");
+      return send(res, 403,
+        "For your security, this page only opens when you type the address yourself.\n\n" +
+        "Type this into the address bar (don't click a link to it):\n\n" +
+        "    http://localhost:" + config.port + "/pair\n");
     }
     return send(res, 200, pairPageHTML(), { "content-type": "text/html; charset=utf-8" });
   }
@@ -565,6 +657,76 @@ async function handle(req, res) {
   // Everything else under /api requires the pairing token.
   if (!authed(req, url)) {
     return send(res, 401, { error: "unauthorized", hint: "send Authorization: Bearer <token>" });
+  }
+
+  // Bridge console ring buffer (startup, grok stderr, errors).
+  if (pathname === "/api/logs" && req.method === "GET") {
+    return send(res, 200, { lines: logBuffer });
+  }
+
+  // Full-text search across every session's conversation history.
+  if (pathname === "/api/search" && req.method === "GET") {
+    const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    if (q.length < 2) return send(res, 400, { error: "query too short" });
+    const results = [];
+    for (const summary of store.list()) {
+      const session = store.get(summary.id);
+      if (!session) continue;
+      const hits = [];
+      // Streaming chunks split words across events — merge whole blocks first.
+      let buf = "", bufKind = "", bufId = 0;
+      const flush = () => {
+        if (!buf) return;
+        const idx = buf.toLowerCase().indexOf(q);
+        if (idx !== -1 && hits.length < 3) {
+          const from = Math.max(0, idx - 60);
+          const snippet = buf.slice(from, idx + q.length + 60).replace(/\s+/g, " ").trim();
+          hits.push({ eventId: bufId, kind: bufKind, snippet });
+        }
+        buf = ""; bufKind = ""; bufId = 0;
+      };
+      for (const { id, event } of session._events) {
+        if (event.kind === "text" || event.kind === "thought") {
+          if (event.kind !== bufKind) flush();
+          if (!buf) { bufKind = event.kind; bufId = id; }
+          buf += event.text || "";
+        } else {
+          flush();
+          if (event.kind === "turn_start") {
+            const t = String(event.text || "");
+            const idx = t.toLowerCase().indexOf(q);
+            if (idx !== -1 && hits.length < 3) {
+              hits.push({ eventId: id, kind: "user", snippet: t.replace(/\s+/g, " ").trim().slice(0, 140) });
+            }
+          }
+        }
+      }
+      flush();
+      if (hits.length) results.push({ sessionId: session.id, title: session.title, count: hits.length, hits });
+    }
+    results.sort((a, b) => b.count - a.count);
+    return send(res, 200, { results: results.slice(0, 20) });
+  }
+
+  // Scheduled tasks.
+  if (pathname === "/api/schedules" && req.method === "GET") {
+    return send(res, 200, { schedules: schedules.list() });
+  }
+  if (pathname === "/api/schedules" && req.method === "POST") {
+    const body = await readJson(req).catch(() => ({}));
+    if (!store.get(body.sessionId)) return send(res, 404, { error: "no such session" });
+    const made = schedules.create(body);
+    if (typeof made === "string") return send(res, 400, { error: made });
+    return send(res, 201, made);
+  }
+  const sm = pathname.match(/^\/api\/schedules\/([0-9a-fA-F-]{36})$/);
+  if (sm && req.method === "PATCH") {
+    const body = await readJson(req).catch(() => ({}));
+    const updated = schedules.update(sm[1], body);
+    return updated ? send(res, 200, updated) : send(res, 404, { error: "no such schedule" });
+  }
+  if (sm && req.method === "DELETE") {
+    return schedules.delete(sm[1]) ? send(res, 200, { ok: true }) : send(res, 404, { error: "no such schedule" });
   }
 
   // Aggregate token/cost usage across every session (overall meter).
@@ -764,7 +926,11 @@ async function handle(req, res) {
 
     if (!sub && req.method === "GET") return send(res, 200, session.toJSON());
 
-    if (!sub && req.method === "DELETE") { store.delete(m[1]); return send(res, 200, { ok: true }); }
+    if (!sub && req.method === "DELETE") {
+      schedules.removeForSession(m[1]);   // orphaned schedules would mis-fire forever
+      store.delete(m[1]);
+      return send(res, 200, { ok: true });
+    }
 
     if (!sub && req.method === "PATCH") {
       const body = await readJson(req).catch(() => ({}));
@@ -862,6 +1028,98 @@ async function handle(req, res) {
     if (sub === "cancel" && req.method === "POST") {
       const cancelled = session.cancel();
       return send(res, 200, { ok: true, cancelled });
+    }
+
+    // Compact: grok's /compact is inert over ACP — bridge runs a summary turn,
+    // then returns a fresh session seeded with the handoff (seedContext).
+    if (sub === "compact" && req.method === "POST") {
+      if (session.transport !== "acp") return send(res, 400, { error: "compaction needs the acp transport" });
+      if (session.status === "running") return send(res, 409, { error: "a turn is already running" });
+      if (!session.turnCount) return send(res, 400, { error: "nothing to compact yet" });
+
+      const SUMMARY_PROMPT =
+        "Write a dense handoff summary of this entire conversation for a fresh session that will continue the work: " +
+        "the goal, what has been done (files touched, commands run, decisions made), the current state, and what remains " +
+        "or is unresolved. Use markdown lists. Do not use any tools. Do not add any preamble or closing remarks.";
+
+      const startId = session._nextEventId;
+      session.beginTurn();
+      session.emit({ kind: "turn_start", text: "Compacting this conversation…", at: new Date().toISOString() });
+      awake.acquire();
+      try {
+        const acp = await ensureAcp(session);
+        const result = await acp.prompt(SUMMARY_PROMPT);
+        session.addUsage(result);
+        session.emit({ kind: "usage", usage: session.usage });
+        session.emit({ kind: "turn_complete", stopReason: result.stopReason });
+      } catch (err) {
+        session.emit({ kind: "error", message: friendlyTurnError(err) });
+        try { session.acp?.stop(); } catch { /* ignore */ }
+        session.acp = null;
+        return send(res, 500, { error: friendlyTurnError(err) });
+      } finally {
+        awake.release();
+        session.endTurn();
+        store.save();
+        session.saveHistory();
+      }
+
+      const summary = session._events
+        .filter((r) => r.id > startId && r.event.kind === "text")
+        .map((r) => r.event.text).join("").trim();
+      if (!summary) return send(res, 500, { error: "grok produced no summary" });
+
+      const fresh = store.create({
+        cwd: session.cwd, model: session.model, effort: session.effort,
+        transport: session.transport, planMode: session.planMode,
+        autoApprove: session.autoApprove, folder: session.folder,
+        sessionKind: session.sessionKind, agentName: session.agentName,
+        title: session.title === "New session" ? undefined : session.title,
+        seedContext: summary,
+      });
+      return send(res, 201, fresh.toJSON());
+    }
+
+    // Read-only project browser, jailed to the session's working directory.
+    if ((sub === "files" || sub === "file") && req.method === "GET") {
+      const base = session.cwd ? resolvePath(session.cwd) : null;
+      if (!base) return send(res, 400, { error: "this session has no working directory" });
+      const rel = url.searchParams.get("path") || "";
+      const full = resolvePath(base, "." + sep + rel);
+      if (full !== base && !full.startsWith(base + sep)) return send(res, 403, { error: "outside the session folder" });
+
+      if (sub === "files") {
+        try {
+          const entries = await readdir(full, { withFileTypes: true });
+          const out = [];
+          for (const e of entries) {
+            if (e.name === ".git") continue;
+            let size = 0;
+            if (e.isFile()) { try { size = (await stat(join(full, e.name))).size; } catch { /* ignore */ } }
+            out.push({ name: e.name, dir: e.isDirectory(), size });
+          }
+          out.sort((a, b) => (Number(b.dir) - Number(a.dir)) || a.name.localeCompare(b.name));
+          return send(res, 200, { path: rel, entries: out.slice(0, 500) });
+        } catch {
+          return send(res, 404, { error: "can't read that folder" });
+        }
+      }
+
+      try {
+        const st = await stat(full);
+        if (!st.isFile()) return send(res, 400, { error: "not a file" });
+        const LIMIT = 262_144;
+        const buf = await readFile(full);
+        const head = buf.subarray(0, Math.min(buf.length, 8192));
+        if (head.includes(0)) return send(res, 200, { path: rel, size: st.size, binary: true });
+        const truncated = buf.length > LIMIT;
+        return send(res, 200, {
+          path: rel, size: st.size, binary: false, truncated,
+          content: buf.subarray(0, LIMIT).toString("utf8"),
+        });
+      } catch {
+        return send(res, 404, { error: "can't read that file" });
+      }
     }
 
     // Live per-session settings: /api/sessions/:id/config { planMode?, effort?, autoApprove? }
