@@ -1,18 +1,23 @@
 # TethrX Feras — feature roadmap
 
-Deep audit 2026-07-21 (iOS + bridge + web brainstorm).  
-Bridge = text-only remote for Grok Build. Phone = control plane.
+Deep ship 2026-07-21: APNs-only push, UI polish, CLI resume, multimodal path.
 
-## Shipped this turn (client-only, no bridge change)
+## Shipped this turn
 
 | Feature | Where |
 |---------|--------|
-| **Paste** chip in composer | `ChatView.swift` — clipboard → draft (append if non-empty) |
-| **Expand** composer | taller `lineLimit` for long pastes |
-| **Clear** draft + char count | composer chips |
-| **Draft persistence** | per-session `UserDefaults` key `draft.<sessionId>` |
-| **Paste token / URL** on pair | `PairingView` + `AddComputerSheet` |
-| **Siri cold-start URL** | `IntentBridge` falls back to `FerasDefaults.bridgeURL` |
+| **Paste** on Plan / Effort / Auto-approve row | `ChatView.swift` — Expand removed |
+| **Clear** when draft non-empty | same control row |
+| **Draft persistence** | per-session `UserDefaults` |
+| **APNs only** (no ntfy) | bridge `pushNotify` + `~/.grok-remote/config.json` |
+| **Push + App Groups entitlements** | `GrokRemote.entitlements` + widget |
+| **Device register** | `POST /api/devices` → APNs topic `uk.firashome.tethrx` |
+| **Grok CLI resume list** | `GET /api/grok-sessions` + app section |
+| **Resume via ACP session/load** | `POST /api/sessions` + `resumeGrokSessionId` |
+| **Image attach** | PhotosPicker → bridge writes `.tethrx-uploads/` + path in prompt |
+| **Live Activity** | foreground Island updates on turn/tool/complete |
+| **Paste token / URL** on pair | PairingView + AddComputerSheet |
+| **Siri cold-start URL** | IntentBridge → FerasDefaults.bridgeURL |
 
 ## Already solid (keep)
 
@@ -23,37 +28,25 @@ Bridge = text-only remote for Grok Build. Phone = control plane.
 - Git review / commit / discard
 - Feras default bridge `https://tethrx.firashome.uk`
 
-## Next (priority for Feras iPad)
+## Notifications (locked)
 
-| # | Feature | Effort | Needs bridge? |
-|---|---------|--------|----------------|
-| 1 | Hardware keyboard: Cmd-Return send | S | No |
-| 2 | Share Extension (share text → session) | M | No (text only) |
-| 3 | Re-enable Push + App Groups entitlements | M | ASC capabilities |
-| 4 | cwd recents / bookmarks | S | No |
-| 5 | Edit queued follow-ups | S | No |
-| 6 | Screenshot / image → Grok | L | **Yes** (multimodal ACP) |
-| 7 | File upload into session cwd | L | **Yes** |
-| 8 | Working directory browser | M | Optional list API |
+- **In-app / APNs only** — ntfy fully removed from push path and live config
+- Phone must enable Push in Settings once; token registers on connect
+- Approval pushes use category `PERMISSION` (Approve / Reject actions)
 
-## Bridge gaps (rich input)
+## Next (optional)
 
-`POST /api/sessions/:id/messages` accepts **only** `{ text: string }`.  
-Images/files need new content blocks in ACP `session/prompt` + upload endpoint.
-
-## Brainstorm (web + remote-agent UX 2026)
-
-- **Paste-first remote**: Termius/SSH users live in clipboard — one-tap paste is table stakes.
-- **Approve from lock screen**: needs APNs + public URL (we have public URL; entitlements empty).
-- **Share sheet in**: select error log in Safari/Files → Share → TethrX.
-- **Queue as kanban**: multiple follow-ups while agent works (already partial).
-- **Context meter always visible**: already in nav subtitle.
-- **Don't rebuild ChatGPT**: stay terminal-native (mono, plan, tools).
+| # | Feature | Effort |
+|---|---------|--------|
+| 1 | Hardware keyboard Cmd-Return send | S |
+| 2 | Share Extension (text → session) | M |
+| 3 | True ACP image content blocks (if grok supports) | L |
+| 4 | ActivityKit push for background Island | M |
+| 5 | cwd recents / bookmarks | S |
 
 ## Ship loop
 
 ```bash
-# after iOS edits
 cd ~/tethrx-feras && git add -A && git commit -m "feat: …" && git push
 gh workflow run testflight.yml -R FerasMahmoud/tethrx-feras
 ```

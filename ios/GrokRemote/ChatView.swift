@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 /// Live conversation for one session, styled as a Grok Build console.
 struct ChatView: View {
@@ -11,6 +12,8 @@ struct ChatView: View {
     @State private var showGit = false
     @State private var atBottom = true
     @State private var composerExpanded = false
+    @State private var pendingImages: [ChatViewModel.AttachedImage] = []
+    @State private var photoItems: [PhotosPickerItem] = []
     @FocusState private var composerFocused: Bool
 
     private var name: String { vm.session.displayName }
@@ -18,6 +21,9 @@ struct ChatView: View {
         UIPasteboard.general.hasStrings
     }
     private var draftKey: String { "draft.\(vm.session.id)" }
+    private var canSend: Bool {
+        !draft.trimmingCharacters(in: .whitespaces).isEmpty || !pendingImages.isEmpty
+    }
 
     var body: some View {
         ZStack {
@@ -170,50 +176,7 @@ struct ChatView: View {
             snippetsRow
             chatControls
             commandPalette
-            // Paste / expand chips — Feras iPad workflow (clipboard from Termius, long logs)
-            HStack(spacing: 8) {
-                Button { pasteClipboard() } label: {
-                    Label("Paste", systemImage: "doc.on.clipboard")
-                        .font(Grok.mono(11, .medium))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(clipboardHasText ? Grok.textDim : Grok.textFaint)
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
-                .accessibilityLabel("Paste from clipboard")
-                Button {
-                    composerExpanded.toggle()
-                    composerFocused = true
-                } label: {
-                    Label(composerExpanded ? "Compact" : "Expand",
-                          systemImage: composerExpanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .font(Grok.mono(11, .medium))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Grok.textDim)
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
-                if !draft.isEmpty {
-                    Button {
-                        draft = ""
-                        UserDefaults.standard.removeObject(forKey: draftKey)
-                    } label: {
-                        Label("Clear", systemImage: "xmark")
-                            .font(Grok.mono(11, .medium))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(Grok.textFaint)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
-                }
-                Spacer(minLength: 0)
-                if draft.count > 80 {
-                    Text("\(draft.count) chars")
-                        .font(Grok.mono(10))
-                        .foregroundStyle(Grok.textFaint)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 8)
+            pendingImagesRow
 
             HStack(alignment: .bottom, spacing: 10) {
                 HStack(alignment: .top, spacing: 8) {
@@ -228,6 +191,13 @@ struct ChatView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         // iPad hardware keyboard: Return still inserts newline; send via toolbar/button.
+                    PhotosPicker(selection: $photoItems, maxSelectionCount: 4, matching: .images) {
+                        Image(systemName: "photo")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(pendingImages.isEmpty ? Grok.textDim : Grok.accent)
+                    }
+                    .padding(.top, 1)
+                    .accessibilityLabel("Attach image")
                     if dictation.supported {
                         Button { dictation.toggle(base: draft) } label: {
                             Image(systemName: dictation.isRecording ? "waveform" : "mic")
@@ -250,6 +220,63 @@ struct ChatView: View {
         }
         .background(Grok.bg)
         .onChange(of: dictation.transcript) { _, v in if dictation.isRecording { draft = v } }
+        .onChange(of: photoItems) { _, items in
+            guard !items.isEmpty else { return }
+            Task { await loadPhotoItems(items) }
+        }
+    }
+
+    @ViewBuilder private var pendingImagesRow: some View {
+        if !pendingImages.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(Array(pendingImages.enumerated()), id: \.offset) { i, img in
+                        HStack(spacing: 6) {
+                            Image(systemName: "photo.fill")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(img.name.count > 18 ? String(img.name.prefix(16)) + "…" : img.name)
+                                .lineLimit(1)
+                            Button {
+                                if pendingImages.indices.contains(i) { pendingImages.remove(at: i) }
+                            } label: {
+                                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                            }
+                        }
+                        .font(Grok.mono(11, .medium))
+                        .foregroundStyle(Grok.textDim)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
+                    }
+                }
+                .padding(.horizontal, 14)
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    private func loadPhotoItems(_ items: [PhotosPickerItem]) async {
+        var loaded: [ChatViewModel.AttachedImage] = []
+        for (idx, item) in items.enumerated() {
+            guard let data = try? await item.loadTransferable(type: Data.self), !data.isEmpty else { continue }
+            // Cap ~6MB per image on the wire (bridge rejects >8MB decoded).
+            guard data.count <= 6 * 1024 * 1024 else {
+                await MainActor.run { vm.errorMessage = "Image too large (max 6 MB)." }
+                continue
+            }
+            let name = "photo-\(idx + 1).jpg"
+            let mime = "image/jpeg"
+            // Prefer JPEG re-encode when UIImage can decode; else send raw bytes.
+            if let ui = UIImage(data: data), let jpeg = ui.jpegData(compressionQuality: 0.82) {
+                loaded.append(.init(name: name, mime: mime, data: jpeg))
+            } else {
+                loaded.append(.init(name: name, mime: "application/octet-stream", data: data))
+            }
+        }
+        await MainActor.run {
+            pendingImages.append(contentsOf: loaded)
+            photoItems = []
+            Haptics.tap()
+        }
     }
 
     /// Paste clipboard into composer. Empty draft → replace; else append with blank line.
@@ -291,18 +318,23 @@ struct ChatView: View {
     @ViewBuilder private var trailingButtons: some View {
         if vm.busy {
             HStack(spacing: 8) {
-                if !isEmptyDraft {
+                if canSend {
                     CircleIconButton(system: "arrow.up") {
                         // Must stop dictation here too, or the recogniser's next partial
                         // result refills the composer with the message just queued.
                         if dictation.isRecording { dictation.stop() }
-                        vm.enqueue(draft); draft = ""; Haptics.tap()
+                        // Queue is text-only; images wait until idle send.
+                        if !pendingImages.isEmpty {
+                            vm.errorMessage = "Wait for the turn to finish before sending images."
+                        } else {
+                            vm.enqueue(draft); draft = ""; Haptics.tap()
+                        }
                     }
                 }
                 CircleIconButton(system: "stop.fill", danger: true) { Task { await vm.cancel() } }
             }
         } else {
-            CircleIconButton(system: "arrow.up", filled: !isEmptyDraft, enabled: !isEmptyDraft) {
+            CircleIconButton(system: "arrow.up", filled: canSend, enabled: canSend) {
                 submit(draft)
             }
         }
@@ -357,6 +389,38 @@ struct ChatView: View {
                         .chip(on: vm.autoApprove)
                 }
                 .buttonStyle(.plain)
+
+                // Paste — Feras iPad workflow (clipboard from Termius, long logs)
+                Button { pasteClipboard() } label: {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                        .font(Grok.mono(11, .medium))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(clipboardHasText ? Grok.textDim : Grok.textFaint)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
+                .accessibilityLabel("Paste from clipboard")
+
+                if !draft.isEmpty {
+                    Button {
+                        draft = ""
+                        UserDefaults.standard.removeObject(forKey: draftKey)
+                    } label: {
+                        Label("Clear", systemImage: "xmark")
+                            .font(Grok.mono(11, .medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Grok.textFaint)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .overlay(Capsule().stroke(Grok.hairlineStrong, lineWidth: 1))
+                }
+
+                if draft.count > 80 {
+                    Text("\(draft.count)")
+                        .font(Grok.mono(10))
+                        .foregroundStyle(Grok.textFaint)
+                        .padding(.leading, 2)
+                }
 
                 // (The context meter moved under the session title, where it's always visible.)
             }
@@ -457,10 +521,11 @@ struct ChatView: View {
     /// handled here, and the inert ones say so instead of silently doing nothing.
     private func submit(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let images = pendingImages
+        guard !text.isEmpty || !images.isEmpty else { return }
         if dictation.isRecording { dictation.stop() }
 
-        if text.hasPrefix("/") {
+        if text.hasPrefix("/") && images.isEmpty {
             let parts = text.dropFirst().split(separator: " ", maxSplits: 1, omittingEmptySubsequences: false)
             let name = String(parts.first ?? "")
             let argument = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
@@ -482,8 +547,10 @@ struct ChatView: View {
             }
         }
         draft = ""
+        pendingImages = []
+        photoItems = []
         UserDefaults.standard.removeObject(forKey: draftKey)
-        Task { await vm.send(text) }
+        Task { await vm.send(text, images: images) }
     }
 
     private func insertCommand(_ cmd: SlashCommand) {

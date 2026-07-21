@@ -2,7 +2,7 @@
 //
 // Zero-dependency: signs the APNs provider JWT (ES256) with node:crypto and posts
 // over node:http2. Disabled unless an APNs auth key (.p8) + Key ID + Team ID are
-// configured — otherwise the bridge falls back to ntfy / nothing.
+// configured — otherwise push is off (no ntfy fallback).
 
 import http2 from "node:http2";
 import { createSign } from "node:crypto";
@@ -16,7 +16,7 @@ export class Apns {
     this.devicesPath = join(stateDir, "devices.json");
     this.keyId = keyId;
     this.teamId = teamId;
-    this.topic = topic || "com.tethrx.app";
+    this.topic = topic || "uk.firashome.tethrx";
     this.keyPem = "";
     this.enabled = false;
     try {
@@ -122,6 +122,6 @@ export function loadApns(config) {
     keyPath: a.keyPath || process.env.GROK_REMOTE_APNS_KEY || "",
     keyId: a.keyId || process.env.GROK_REMOTE_APNS_KEY_ID || "",
     teamId: a.teamId || process.env.GROK_REMOTE_APNS_TEAM_ID || "",
-    topic: a.topic || process.env.GROK_REMOTE_APNS_TOPIC || "com.tethrx.app",
+    topic: a.topic || process.env.GROK_REMOTE_APNS_TOPIC || "uk.firashome.tethrx",
   });
 }

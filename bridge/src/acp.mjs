@@ -333,11 +333,16 @@ export class AcpSession {
     }
   }
 
-  async prompt(text) {
+  /** Send a user turn. `textOrBlocks` is a string (wrapped as text block) or an
+   *  array of ACP content blocks passed through as-is. */
+  async prompt(textOrBlocks) {
     this.lastActivity = Date.now();
+    const prompt = Array.isArray(textOrBlocks)
+      ? textOrBlocks
+      : [{ type: "text", text: String(textOrBlocks ?? "") }];
     const result = await this._request("session/prompt", {
       sessionId: this.grokSessionId,
-      prompt: [{ type: "text", text }],
+      prompt,
     });
     this.lastActivity = Date.now();
     // grok reports token usage for the turn in the result _meta — surface it so the

@@ -30,6 +30,8 @@ final class AppState: ObservableObject {
 
     @Published var health: HealthInfo?
     @Published var sessions: [SessionInfo] = []
+    /// Host Grok CLI sessions (`GET /api/grok-sessions`) — resume into a bridge session.
+    @Published var grokCliSessions: [GrokCliSession] = []
     @Published var lastUsage: UsageReport?      // for the home-screen widget
     @Published var connected = false
     @Published var connecting = false
@@ -111,6 +113,7 @@ final class AppState: ObservableObject {
         connected = false
         health = nil
         sessions = []
+        grokCliSessions = []
         baseURLString = bridge.address
         token = saved                  // didSet also refreshes the active Keychain slot
         activeBridgeId = bridge.id
@@ -130,6 +133,7 @@ final class AppState: ObservableObject {
             connected = false
             health = nil
             sessions = []
+            grokCliSessions = []
             baseURLString = ""
             token = ""
             userDisconnected = true
@@ -174,6 +178,7 @@ final class AppState: ObservableObject {
             lastUsage = try? await client.usage()
             publishWidgetSnapshot()
             if let t = pushToken { try? await client.registerDevice(t) }   // (re)register for push
+            await reloadGrokCliSessions()                                  // best-effort CLI history
             if !bootstrapping { Haptics.success() }   // confirm an explicit connect (not silent launch reconnect)
         } catch {
             connected = false
@@ -198,6 +203,33 @@ final class AppState: ObservableObject {
             publishWidgetSnapshot()
         }
         catch { errorMessage = friendly(error) }
+        await reloadGrokCliSessions()
+    }
+
+    /// Best-effort load of host Grok CLI sessions for resume. Never fails connect.
+    func reloadGrokCliSessions() async {
+        guard let client else { return }
+        grokCliSessions = (try? await client.listGrokSessions(limit: 40)) ?? []
+    }
+
+    /// Create a bridge session that resumes a host Grok CLI session via ACP.
+    func resumeGrokSession(_ g: GrokCliSession) async -> SessionInfo? {
+        guard let client else { return nil }
+        do {
+            let s = try await client.createSession(
+                cwd: g.cwd,
+                effort: g.effort,
+                planMode: false,
+                autoApprove: defaultAutoApprove,
+                resumeGrokSessionId: g.id,
+                title: g.displayName
+            )
+            sessions.insert(s, at: 0)
+            return s
+        } catch {
+            errorMessage = friendly(error)
+            return nil
+        }
     }
 
     /// Push a small status snapshot to the home-screen widget via the app group.
@@ -384,6 +416,7 @@ final class AppState: ObservableObject {
         connected = false
         health = nil
         sessions = []
+        grokCliSessions = []
         errorMessage = nil
         userDisconnected = true       // stay on the pairing screen next launch, don't auto-reconnect
     }

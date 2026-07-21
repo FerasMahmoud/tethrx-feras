@@ -24,6 +24,7 @@ struct SessionListView: View {
                     header
                     workingDir
                     sessions
+                    grokCliSection
                 }
                 .padding(20)
             }
@@ -317,6 +318,82 @@ struct SessionListView: View {
         creating = true
         defer { creating = false }
         if let session = await app.newSession() { path.append(session) }
+    }
+
+    // MARK: Grok CLI resume
+
+    @ViewBuilder
+    private var grokCliSection: some View {
+        if !app.grokCliSessions.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 12) {
+                    Eyebrow("GROK CLI (RESUME)")
+                    Spacer()
+                    Text("\(app.grokCliSessions.count)")
+                        .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
+                }
+                .padding(.bottom, 12)
+
+                Text("Resume a session from the host Grok CLI store into a bridge session.")
+                    .font(Grok.mono(11)).foregroundStyle(Grok.textFaint)
+                    .padding(.bottom, 10)
+
+                ForEach(Array(app.grokCliSessions.prefix(12).enumerated()), id: \.element.id) { index, g in
+                    if index > 0 { Rectangle().fill(Grok.hairline).frame(height: 1) }
+                    Button {
+                        Haptics.tap()
+                        Task {
+                            if let s = await app.resumeGrokSession(g) {
+                                path.append(s)
+                            }
+                        }
+                    } label: {
+                        GrokCliRow(session: g)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+}
+
+/// Compact row for a host Grok CLI session (resume into bridge).
+struct GrokCliRow: View {
+    let session: GrokCliSession
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(session.id.prefix(8))
+                        .font(Grok.mono(11, .medium)).foregroundStyle(Grok.textFaint)
+                    if session.active == true {
+                        HStack(spacing: 5) {
+                            Circle().fill(Grok.accent).frame(width: 6, height: 6)
+                            Text("ACTIVE").font(Grok.mono(9, .semibold)).tracking(0.8).foregroundStyle(Grok.accent)
+                        }
+                    }
+                }
+                Text(session.displayName)
+                    .font(Grok.sans(16, .semibold)).foregroundStyle(Grok.text).lineLimit(1)
+                HStack(spacing: 8) {
+                    if let cwd = session.cwd, !cwd.isEmpty {
+                        Text(cwd).font(Grok.mono(11)).foregroundStyle(Grok.textDim)
+                            .lineLimit(1).truncationMode(.head)
+                    }
+                    if let n = session.messageCount {
+                        Text("· \(n) msg\(n == 1 ? "" : "s")")
+                            .font(Grok.mono(11)).foregroundStyle(Grok.textFaint).fixedSize()
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "arrow.uturn.backward")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Grok.textFaint)
+        }
+        .padding(.vertical, 16)
+        .contentShape(Rectangle())
     }
 }
 

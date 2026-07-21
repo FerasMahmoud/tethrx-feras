@@ -18,6 +18,28 @@ struct SavedBridge: Codable, Identifiable, Hashable {
     var tokenAccount: String { "bridge.token." + id }
 }
 
+/// A session from the host Grok CLI store (`GET /api/grok-sessions`), not yet a bridge session.
+struct GrokCliSession: Codable, Identifiable, Hashable {
+    let id: String
+    var cwd: String?
+    var title: String?
+    var summary: String?
+    var model: String?
+    var effort: String?
+    var createdAt: String?
+    var updatedAt: String?
+    var lastActiveAt: String?
+    var messageCount: Int?
+    var active: Bool?
+
+    var displayName: String {
+        let t = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !t.isEmpty { return t }
+        if let cwd, !cwd.isEmpty { return (cwd as NSString).lastPathComponent }
+        return String(id.prefix(8))
+    }
+}
+
 /// A Grok conversation tracked by the bridge.
 struct SessionInfo: Codable, Identifiable, Hashable {
     let id: String

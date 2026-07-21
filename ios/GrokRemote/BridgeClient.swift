@@ -75,12 +75,45 @@ struct BridgeClient {
         return try JSONDecoder().decode(UsageReport.self, from: data)
     }
 
-    func createSession(cwd: String?, effort: String? = nil, planMode: Bool = false, autoApprove: Bool = false) async throws -> SessionInfo {
+    /// Sessions from the host Grok CLI store (not yet bridge sessions).
+    func listGrokSessions(limit: Int = 50, cwd: String? = nil) async throws -> [GrokCliSession] {
+        guard var comps = URLComponents(url: try url("/api/grok-sessions"), resolvingAgainstBaseURL: false) else {
+            throw BridgeError.badURL
+        }
+        var items: [URLQueryItem] = [URLQueryItem(name: "limit", value: String(limit))]
+        if let cwd, !cwd.isEmpty { items.append(URLQueryItem(name: "cwd", value: cwd)) }
+        comps.queryItems = items
+        guard let u = comps.url else { throw BridgeError.badURL }
+        var req = URLRequest(url: u)
+        req.timeoutInterval = 15
+        req.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        // Accept either a bare array or `{ "sessions": [...] }`.
+        if let list = try? JSONDecoder().decode([GrokCliSession].self, from: data) {
+            return list
+        }
+        struct Wrapper: Codable { let sessions: [GrokCliSession] }
+        return try JSONDecoder().decode(Wrapper.self, from: data).sessions
+    }
+
+    func createSession(
+        cwd: String?,
+        effort: String? = nil,
+        planMode: Bool = false,
+        autoApprove: Bool = false,
+        resumeGrokSessionId: String? = nil,
+        title: String? = nil
+    ) async throws -> SessionInfo {
         var body: [String: Any] = [:]
         if let cwd, !cwd.isEmpty { body["cwd"] = cwd }
         if let effort, !effort.isEmpty { body["effort"] = effort }
         if planMode { body["planMode"] = true }
         if autoApprove { body["autoApprove"] = true }
+        if let resumeGrokSessionId, !resumeGrokSessionId.isEmpty {
+            body["resumeGrokSessionId"] = resumeGrokSessionId
+        }
+        if let title, !title.isEmpty { body["title"] = title }
         let (data, resp) = try await session.data(for: try request("/api/sessions", method: "POST", json: body))
         try Self.check(resp)
         return try JSONDecoder().decode(SessionInfo.self, from: data)
@@ -111,9 +144,12 @@ struct BridgeClient {
         try Self.check(resp)
     }
 
-    func send(sessionId: String, text: String) async throws {
+    /// Send a user message. Optional `images` are `[{name, mime, data: base64}]`.
+    func send(sessionId: String, text: String, images: [[String: Any]]? = nil) async throws {
+        var body: [String: Any] = ["text": text]
+        if let images, !images.isEmpty { body["images"] = images }
         let (_, resp) = try await session.data(
-            for: try request("/api/sessions/\(sessionId)/messages", method: "POST", json: ["text": text]))
+            for: try request("/api/sessions/\(sessionId)/messages", method: "POST", json: body))
         try Self.check(resp)
     }
 

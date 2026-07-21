@@ -44,8 +44,8 @@ const DEFAULTS = {
   // Set GROK_REMOTE_ASK=0 to inherit your global grok permission config instead.
   askPermission: (process.env.GROK_REMOTE_ASK ?? "1") !== "0",
 
-  // Optional ntfy topic URL (e.g. https://ntfy.sh/your-secret-topic) for push alerts
-  // when the app isn't watching a session — approval-needed and turn-complete.
+  // DEPRECATED / IGNORED — ntfy push removed; APNs only. Field kept so old config.json
+  // / GROK_REMOTE_NTFY env values don't break load(); bridge never sends to ntfy.
   ntfy: process.env.GROK_REMOTE_NTFY || "",
 
   // Publicly-reachable base URL of THIS bridge (e.g. https://100.x.y.z:4180 over

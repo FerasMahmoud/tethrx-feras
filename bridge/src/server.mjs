@@ -4,9 +4,10 @@
 // Exposes a running, authenticated Grok Build install to a phone (or any) client:
 //   GET  /api/health                     -> liveness + grok version (no auth)
 //   GET  /api/sessions                   -> list sessions
-//   POST /api/sessions                   -> { cwd?, model?, title? } create a session
+//   GET  /api/grok-sessions              -> list Grok CLI sessions (for resume)
+//   POST /api/sessions                   -> { cwd?, model?, title?, resumeGrokSessionId? } create a session
 //   GET  /api/sessions/:id               -> session detail
-//   POST /api/sessions/:id/messages      -> { text, permissionMode?, alwaysApprove?, allow?, deny? }
+//   POST /api/sessions/:id/messages      -> { text?, images?, permissionMode?, alwaysApprove?, allow?, deny? }
 //   POST /api/sessions/:id/cancel        -> abort the running turn
 //   GET  /api/sessions/:id/stream        -> SSE stream of normalized Grok events
 //   GET  /                               -> bundled web test client
@@ -17,10 +18,10 @@
 
 import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir, chmod } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, normalize as normPath, sep } from "node:path";
+import { dirname, join, normalize as normPath, sep, basename } from "node:path";
 import { timingSafeEqual, randomBytes } from "node:crypto";
 import { networkInterfaces, hostname } from "node:os";
 
@@ -29,6 +30,7 @@ import { SessionStore } from "./sessions.mjs";
 import { runHeadlessTurn, grokVersion } from "./grok.mjs";
 import { ensureAskGrokHome, AcpSession } from "./acp.mjs";
 import { loadApns } from "./apns.mjs";
+import { listGrokSessions } from "./grok-sessions.mjs";
 import * as awake from "./awake.mjs";
 import * as git from "./git.mjs";
 
@@ -38,7 +40,7 @@ const store = new SessionStore(join(config.stateDir, "sessions.json"));
 const apns = loadApns(config);   // native push (disabled unless an APNs key is configured)
 
 // Single-use, decision-bound tokens for lock-screen approval links, so the full
-// pairing token is never embedded in an ntfy notification.
+// pairing token is never embedded in a push notification.
 const approvalTokens = new Map(); // token -> { sessionId, requestId, optionId, exp }
 function mintApprovalToken(sessionId, requestId, optionId) {
   const now = Date.now();
@@ -224,44 +226,31 @@ async function serveStatic(res, urlPath) {
 
 // ---- turn execution --------------------------------------------------------
 
-// Push a notification via ntfy, but only when nobody is actively watching this
+// Push a notification via APNs, but only when nobody is actively watching this
 // session (so you're alerted precisely when the app is backgrounded).
-async function pushNotify(session, { title, message, priority = "default", tags, actions, category, requestId, allowOptionId, rejectOptionId }) {
+async function pushNotify(session, { title, message, category, requestId, allowOptionId, rejectOptionId }) {
   if (session.subscriberCount > 0) return;   // someone's watching live — no need to alert
-  // Native push straight to the phone (when an APNs key is configured).
   apns.send({
     title, body: message, sessionId: session.id,
     category, requestId, allowOptionId, rejectOptionId,
   }).catch(() => {});
-  // Optional ntfy fallback.
-  if (config.ntfy) {
-    try {
-      const headers = { Title: title, Priority: priority };
-      if (tags) headers.Tags = tags;
-      if (actions) headers.Actions = actions;
-      await fetch(config.ntfy, { method: "POST", headers, body: message });
-    } catch { /* best-effort */ }
-  }
 }
 
-// Push an approval alert with Approve/Reject buttons (when a public URL is set) so
+// Push an approval alert with Approve/Reject via APNs PERMISSION category so
 // you can resolve a permission from the lock screen without opening the app.
+// (Approval tokens still minted for /api/approve deep links if the app uses them.)
 function notifyPermission(session, event) {
   const allow = (event.options || []).find((o) => /allow/i.test(o.kind || o.optionId));
   const reject = (event.options || []).find((o) => /reject|deny/i.test(o.kind || o.optionId));
 
-  let actions;
+  // Keep minting so /api/approve links remain valid if the client embeds them.
   if (config.publicUrl && event.requestId) {
-    const base = config.publicUrl.replace(/\/$/, "");
-    const parts = [];
-    if (allow) parts.push(`http, Approve, ${base}/api/approve/${mintApprovalToken(session.id, event.requestId, allow.optionId)}, clear=true`);
-    if (reject) parts.push(`http, Reject, ${base}/api/approve/${mintApprovalToken(session.id, event.requestId, reject.optionId)}, clear=true`);
-    if (parts.length) actions = parts.join("; ");
+    if (allow) mintApprovalToken(session.id, event.requestId, allow.optionId);
+    if (reject) mintApprovalToken(session.id, event.requestId, reject.optionId);
   }
   pushNotify(session, {
     title: `${displayTitle(session)} — approval needed`,
     message: event.command || event.title || "Grok wants to run a tool",
-    priority: "high", tags: "warning", actions,
     // Drives Approve/Reject buttons on the iOS notification itself.
     category: "PERMISSION",
     requestId: event.requestId,
@@ -321,7 +310,7 @@ function startHeadlessTurn(session, body) {
     .then((result) => {
       // Grok emits its own `end`; add a bridge-level marker for the client's state machine.
       session.emit({ kind: "turn_complete", stopReason: result.stopReason });
-      pushNotify(session, { title: displayTitle(session), message: "Grok finished the turn.", tags: "white_check_mark" });
+      pushNotify(session, { title: displayTitle(session), message: "Grok finished the turn." });
     })
     .catch((err) => {
       session.emit({ kind: "error", message: friendlyTurnError(err) });
@@ -355,7 +344,7 @@ async function ensureAcp(session) {
         notifyPermission(session, event);
       }
       if (event.kind === "plan_review") {
-        pushNotify(session, { title: `${displayTitle(session)} — plan ready`, message: "Grok drafted a plan; review to proceed.", priority: "high", tags: "clipboard" });
+        pushNotify(session, { title: `${displayTitle(session)} — plan ready`, message: "Grok drafted a plan; review to proceed." });
       }
       session.emit(event);
     },
@@ -390,7 +379,7 @@ function startAcpTurn(session, body) {
       session.addUsage(result);                                    // fold grok's token report in
       session.emit({ kind: "usage", usage: session.usage });       // live meter update
       session.emit({ kind: "turn_complete", stopReason: result.stopReason });
-      pushNotify(session, { title: displayTitle(session), message: "Grok finished the turn.", tags: "white_check_mark" });
+      pushNotify(session, { title: displayTitle(session), message: "Grok finished the turn." });
     } catch (err) {
       session.emit({ kind: "error", message: friendlyTurnError(err) });
       try { session.acp?.stop(); } catch { /* ignore */ }   // don't orphan the child
@@ -507,12 +496,22 @@ async function handle(req, res) {
     return send(res, ok ? 200 : 400, { ok, push: apns.enabled });
   }
 
+  // Grok CLI sessions on this machine (for resume in the phone app).
+  if (pathname === "/api/grok-sessions" && req.method === "GET") {
+    const limit = Number(url.searchParams.get("limit") || 50);
+    const cwd = url.searchParams.get("cwd") || null;
+    return send(res, 200, { sessions: listGrokSessions({ limit, cwdFilter: cwd }) });
+  }
+
   // /api/sessions
   if (pathname === "/api/sessions" && req.method === "GET") {
     return send(res, 200, { sessions: store.list() });
   }
   if (pathname === "/api/sessions" && req.method === "POST") {
     const body = await readJson(req).catch(() => ({}));
+    const resumeId = typeof body.resumeGrokSessionId === "string" && body.resumeGrokSessionId.trim()
+      ? body.resumeGrokSessionId.trim()
+      : undefined;
     const session = store.create({
       cwd: body.cwd || config.defaultCwd,
       model: body.model || config.defaultModel,
@@ -520,7 +519,8 @@ async function handle(req, res) {
       transport: body.transport || config.transport,
       planMode: body.planMode ?? false,
       autoApprove: body.autoApprove ?? false,
-      title: body.title,
+      title: body.title || (resumeId ? "Resumed" : undefined),
+      grokSessionId: resumeId,
     });
     return send(res, 201, session.toJSON());
   }
@@ -576,13 +576,53 @@ async function handle(req, res) {
 
     if (sub === "messages" && req.method === "POST") {
       const body = await readJson(req).catch(() => ({}));
-      if (!body.text || typeof body.text !== "string") {
-        return send(res, 400, { error: "missing 'text'" });
+      const hasText = typeof body.text === "string" && body.text.length > 0;
+      const images = Array.isArray(body.images) ? body.images : [];
+      if (!hasText && images.length === 0) {
+        return send(res, 400, { error: "missing 'text' or 'images'" });
       }
       if (session.status === "running") {
         return send(res, 409, { error: "a turn is already running in this session" });
       }
-      startTurn(session, body);
+
+      // Multimodal path-on-disk fallback: ACP is text-only for now, so write images
+      // under session.cwd/.tethrx-uploads/ and append absolute paths into the prompt.
+      let promptText = hasText ? body.text : "";
+      if (images.length) {
+        const uploadDir = join(session.cwd, ".tethrx-uploads");
+        try {
+          await mkdir(uploadDir, { recursive: true });
+        } catch (err) {
+          return send(res, 500, { error: `cannot create upload dir: ${err.message || err}` });
+        }
+        const stamp = Date.now();
+        for (let i = 0; i < images.length; i++) {
+          const img = images[i] || {};
+          if (typeof img.data !== "string" || !img.data) {
+            return send(res, 400, { error: `images[${i}]: missing base64 data` });
+          }
+          let buf;
+          try {
+            buf = Buffer.from(img.data, "base64");
+          } catch {
+            return send(res, 400, { error: `images[${i}]: invalid base64` });
+          }
+          if (buf.length > 8 * 1024 * 1024) {
+            return send(res, 400, { error: `images[${i}]: exceeds 8MB limit` });
+          }
+          const safeName = basename(String(img.name || `image-${i}.bin`)).replace(/[^\w.\-]+/g, "_") || `image-${i}.bin`;
+          const dest = join(uploadDir, `${stamp}-${safeName}`);
+          try {
+            await writeFile(dest, buf);
+            try { await chmod(dest, 0o600); } catch { /* best-effort */ }
+          } catch (err) {
+            return send(res, 500, { error: `images[${i}]: write failed: ${err.message || err}` });
+          }
+          promptText += `\n[Image attached: ${dest}]`;
+        }
+      }
+
+      startTurn(session, { ...body, text: promptText });
       return send(res, 202, { ok: true, sessionId: session.id, turn: session.turnCount });
     }
 
@@ -697,7 +737,6 @@ server.listen(config.port, listenHost, async () => {
   console.log(`  ├─ web client  ${scheme}://${reachable}:${config.port}/`);
   console.log(`  ├─ pair phone  ${scheme}://localhost:${config.port}/pair  (open here, scan in the app)`);
   console.log(`  ├─ push (apns) ${apns.enabled ? `on  (${apns.tokens.length} device${apns.tokens.length === 1 ? "" : "s"})` : "off  (set apns key in config.json)"}`);
-  console.log(`  ├─ push (ntfy) ${config.ntfy || "off  (set GROK_REMOTE_NTFY)"}`);
   if (config.publicUrl) console.log(`  ├─ public url  ${config.publicUrl}  (lock-screen approve/reject)`);
   console.log(`  └─ pairing token:\n\n     ${config.token}\n`);
   if (config.host === "127.0.0.1") {

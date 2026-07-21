@@ -26,6 +26,10 @@
 	<false/>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>
@@ -45,6 +49,8 @@
 	<string>Grok Remote connects to the bridge daemon running on your computer over your local network.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the pairing QR code shown by the bridge on your computer to connect.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Attach screenshots and photos so Grok can review them in the session working directory.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Unlock TethrX with Face ID, since it can run commands on your computer.</string>
 	<key>NSMicrophoneUsageDescription</key>

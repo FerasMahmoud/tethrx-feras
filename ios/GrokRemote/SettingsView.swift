@@ -174,9 +174,9 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 12) {
             Eyebrow("NOTIFICATIONS")
             toggleRow("Push notifications",
-                      "Get alerted when Grok finishes a turn or needs approval — even with the app closed",
+                      "APNs alerts when Grok finishes a turn or needs approval — even with the app closed",
                       Binding(get: { push.enabled }, set: { $0 ? push.enable() : push.disable() }))
-            Text("Requires an APNs key configured on your bridge. Delivered to this phone when it isn't actively watching a session.")
+            Text("Uses Apple Push (APNs) only. Requires an APNs key on the bridge and Push entitlement on this app. Delivered when the phone is not actively watching the session.")
                 .font(Grok.mono(10)).foregroundStyle(Grok.textFaint)
         }
     }

@@ -82,13 +82,27 @@ final class ChatViewModel: ObservableObject {
         streamTask = nil
     }
 
-    func send(_ text: String) async {
+    /// Image attachment for multimodal send (base64-encoded on the wire).
+    struct AttachedImage {
+        var name: String
+        var mime: String
+        var data: Data
+    }
+
+    func send(_ text: String, images: [AttachedImage] = []) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty || !images.isEmpty else { return }
         busy = true
         errorMessage = nil
         do {
-            try await client.send(sessionId: session.id, text: trimmed)
+            let payload: [[String: Any]]? = images.isEmpty ? nil : images.map {
+                [
+                    "name": $0.name,
+                    "mime": $0.mime,
+                    "data": $0.data.base64EncodedString()
+                ]
+            }
+            try await client.send(sessionId: session.id, text: trimmed, images: payload)
         } catch {
             busy = false
             errorMessage = (error as? BridgeError)?.errorDescription ?? error.localizedDescription
